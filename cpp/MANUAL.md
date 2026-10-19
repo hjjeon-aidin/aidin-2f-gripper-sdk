@@ -555,7 +555,8 @@ cycles.
 8-bit tactile values: 1 LSB = 0.2 mm / 0.2 N (draft scale — may change);
 out-of-range values clamp and set `saturated`. `Px8` is uint8 since
 v1.18.0 (int8 before). With `CFG_SENSOR_TYPE` ≠ 2 the six tactile words
-are 0.
+are 0. Packing rules, a decoded wire example, PLC addressing and polling
+timing per baud rate: [root README](../README.md#fast-poll-block--고속-폴링-블록-0x02c00x02c9).
 
 ---
 

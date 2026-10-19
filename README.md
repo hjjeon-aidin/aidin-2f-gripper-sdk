@@ -240,7 +240,7 @@ SAVE_CONFIG`; address/baud changes apply after a power cycle. 상세 절차는
 | `0x0180` | W | `DEV_CMD` | developer/config command code — key codes below |
 | `0x0181` | R | `DEV_STATUS` | 0 = IDLE · 1 = RUNNING · 2 = OK · 3 = ERROR |
 | `0x0182` | R/W | `CFG_MB_ADDR` | Modbus slave address, 1..247 (see "Multiple grippers on one bus" in [python/README.md](python/README.md#multiple-grippers-on-one-bus-rs485-multi-drop)) |
-| `0x0183`/`0x0184` | R/W | `CFG_MB_BAUD_LO/HI` | serial baud rate, raw bps as 32-bit LO/HI (e.g. 115200 → `0xC200`/`0x0001`). Supported 9600 · 19200 · 38400 · 57600 · 115200 · 230400 · 460800 · 921600 · 1000000; unsupported → `SAVE_CONFIG` ERROR. Firmware protocol ≥ v1.16.0 (older firmware always runs at 115200) |
+| `0x0183`/`0x0184` | R/W | `CFG_MB_BAUD_LO/HI` | serial baud rate, raw bps as 32-bit LO/HI (e.g. 115200 → `0xC200`/`0x0001`). Changing the rate is **(개발중, 구현 예정)** — see [Baud rate change](#baud-rate-change--보율-변경-개발중-구현-예정); use 115200 for now |
 | `0x0185`/`0x0186` | R/W | `CFG_CAN_ID` / `CFG_CAN_RATE` | FDCAN node ID / rate (1 = 1 Mbps, 2 = 500 kbps) |
 | `0x0187` | R | `CFG_DEV_TYPE` | device type (101 = AIDIN_GRIPPER) |
 | `0x0188`/`0x0189` | R | `CFG_SERIAL_LO/HI` | serial number, 32-bit LO/HI |
@@ -372,59 +372,200 @@ cover the 32 mm toward the fingertip.
 Firmware protocol ≥ v1.15.0. A **read-only copy** of the essentials —
 gripper status, position, current, fault and both fingertips' tactile
 resultant — packed so **one FC03 read of 10 registers** returns them all.
-The firmware rewrites the 10 words in one go with interrupts briefly
-blocked, so every reply is a single consistent snapshot. The original
-addresses (`0x0200~`, `0x0220~`) stay valid.
+The firmware rewrites the 10 words in one go, so every reply is a single
+consistent snapshot. Writes are ignored (overwritten on the next update);
+the original addresses (`0x0200~`, `0x0220~`) stay valid.
 
 필수 값만 **FC03 한 번(10워드)** 으로 읽기 위한 특수 용도 읽기 전용 블록입니다.
-펌웨어가 10워드를 한 번에 갱신하므로 한 응답은 항상 같은 주기의 값입니다.
 
-Measured at 115200 bps: **~4.0 ms per read (max ~248 Hz)**, vs ~8.6 ms
-for reading `0x0200` and `0x0220` separately.
+#### Register layout / 레지스터 배치
 
-| Addr | High byte [15:8] | Low byte [7:0] | Copy of |
-|---|---|---|---|
-| `0x02C0` | 0 | `STATUS` (same bits as `0x0200`) | `0x0200` |
-| `0x02C1` | 0 | `gPO` position 0..255 (0 = open) | `0x0203` |
-| `0x02C2` | 0 | `gCU` current 0..255 | `0x0204` |
-| `0x02C3` | right `Px8` | right `Py8` | `0x0221` / `0x0222` |
-| `0x02C4` | right `Fx8` | right `Fy8` | `0x0223` / `0x0224` |
-| `0x02C5` | right `Fz8` | right `status8` | `0x0225` / `0x0220` |
-| `0x02C6` | left `Px8` | left `Py8` | `0x0229` / `0x022A` |
-| `0x02C7` | left `Fx8` | left `Fy8` | `0x022B` / `0x022C` |
-| `0x02C8` | left `Fz8` | left `status8` | `0x022D` / `0x0228` |
-| `0x02C9` | 0 | `gFLT` fault code | `0x0201` |
-
-Tactile values are compressed to 8 bits (**1 LSB = 0.2 mm / 0.2 N**,
-draft scale ⚠ — may change once the sensor range is final):
-
-| Field | Type | Range | Decode |
-|---|---|---|---|
-| `Px8` | uint8 | 0 .. 51.0 mm | `mm = v × 0.2` (0 = no contact point) |
-| `Py8` | int8 | −25.6 .. +25.4 mm | `mm = (int8)v × 0.2` |
-| `Fx8` / `Fy8` | int8 | −25.6 .. +25.4 N | `N = (int8)v × 0.2` |
-| `Fz8` | uint8 | 0 .. 51.0 N | `N = v × 0.2` |
-| `status8` | bits | — | `TACT_STATUS >> 8`: b0 valid · b1 saturated · b2 timeout · b3 connected · b4 raw_stream · b5 contact · b6 seen · b7 raw_fresh |
-
-Out-of-range values clamp to the end value and set `saturated`. With
-`CFG_SENSOR_TYPE` ≠ 2 the six tactile words read 0. `Px8` is uint8 since
-v1.18.0 (int8 before). Writes are ignored (overwritten on the next update).
-
-| | Python | C++ |
+| Addr | [15:8] | [7:0] |
 |---|---|---|
-| Read + decode | `s = g.read_fast_state()` → `FastState` (`s.position`, `s.current`, `s.fault`, `s.stage`, `s.right`, `s.left`) | `auto s = g.readFastState();` → `FastState` |
-| Example | [`python/examples/09_fast_poll.py`](python/examples/09_fast_poll.py) | [`cpp/examples/05_fast_poll.cpp`](cpp/examples/05_fast_poll.cpp) |
+| `0x02C0` | 0 | `STATUS` |
+| `0x02C1` | 0 | `gPO` |
+| `0x02C2` | 0 | `gCU` |
+| `0x02C3` | `Px` R | `Py` R |
+| `0x02C4` | `Fx` R | `Fy` R |
+| `0x02C5` | `Fz` R | `status8` R |
+| `0x02C6` | `Px` L | `Py` L |
+| `0x02C7` | `Fx` L | `Fy` L |
+| `0x02C8` | `Fz` L | `status8` L |
+| `0x02C9` | 0 | `gFLT` |
 
-Decoding by hand (any language):
+R = right finger (tip 1), L = left finger (tip 2). PLC "4x" addresses:
+40705..40714.
+
+| Field | Register [bits] | Type | LSB | Range | Copy of | Meaning |
+|---|---|---|---|---|---|---|
+| `STATUS` | `0x02C0` [7:0] | bits | — | — | `0x0200` | `gACT` · `gHOM` · `gGTO` · `gSTA` · `gOBJ`, same bits as [`0x0200`](#status-bits-read-0x0200) |
+| `gPO` | `0x02C1` [7:0] | uint8 | — | 0..255 | `0x0203` | actual position, 0 = open, 255 = closed |
+| `gCU` | `0x02C2` [7:0] | uint8 | — | 0..255 | `0x0204` | actual motor current (normalized) |
+| `Px` | `0x02C3` / `0x02C6` [15:8] | uint8 | 0.2 mm | 0 .. 51.0 mm | `POSX` `0x0221` / `0x0229` | contact point X, from the wrist-side edge of the cell area toward the fingertip; **0 = no contact point** |
+| `Py` | `0x02C3` / `0x02C6` [7:0] | int8 | 0.2 mm | −25.6 .. +25.4 mm | `POSY` `0x0222` / `0x022A` | contact point Y across the pad width (centre = 0) |
+| `Fx` | `0x02C4` / `0x02C7` [15:8] | int8 | 0.2 N | −25.6 .. +25.4 N | `FX` `0x0223` / `0x022B` | shear force along +X, after tare |
+| `Fy` | `0x02C4` / `0x02C7` [7:0] | int8 | 0.2 N | −25.6 .. +25.4 N | `FY` `0x0224` / `0x022C` | shear force along +Y, after tare |
+| `Fz` | `0x02C5` / `0x02C8` [15:8] | uint8 | 0.2 N | 0 .. 51.0 N | `FZ` `0x0225` / `0x022D` | normal force, positive = pressing, after tare |
+| `status8` | `0x02C5` / `0x02C8` [7:0] | — | — | — | — | tactile status — **(개발중, 구현 예정)**, see [below](#tactile-status-status8--개발중-구현-예정) |
+| `gFLT` | `0x02C9` [7:0] | uint8 | — | 0..11 | `0x0201` | current fault code ([fault codes](#fault-codes--폴트-코드-gflt--gflto)); the latched `gFLTO` is not in the block |
+
+- Modbus sends the high byte first, so each tip's bytes arrive as
+  `Px, Py, Fx, Fy, Fz, status8`. Unused high bytes are 0.
+- A tip without a valid reading has all five values at 0. With
+  `CFG_SENSOR_TYPE` ≠ 2 all six tactile words are 0.
+- Reading 9 registers (`0x02C0~0x02C8`) skips `gFLT`.
+- The tactile 1 LSB and ranges above use a provisional scale — to be
+  changed after the sensor's final specification
+  ([details](#tactile-8-bit-encoding--촉각-8비트-압축)).
+
+#### Tactile 8-bit encoding / 촉각 8비트 압축
+
+The tactile source registers are int16 at a ×100 scale ([mm × 100],
+[N × 100]). The block keeps each value in one byte at 1/20 of that scale:
+**1 LSB = 0.2 mm / 0.2 N**.
+
+> ⚠ **Provisional scale** — 0.2 mm / 0.2 N (and the ranges that follow
+> from it) will be changed once the sensor's final specification is
+> confirmed. The SDKs keep it in one constant (`FAST_TACT_LSB`).
+>
+> 스케일은 현재 센서 최종 스펙 확정 후 변경 예정입니다.
+
+**Firmware packing** (per field, integer arithmetic):
 
 ```
-w = read_holding(0x02C0, 10)
-status, position, current, fault = w[0], w[1] & 0xFF, w[2] & 0xFF, w[9] & 0xFF
-for tip, o in (("right", 3), ("left", 6)):
-    px = (w[o] >> 8) * 0.2            ; py = int8(w[o] & 0xFF) * 0.2
-    fx = int8(w[o+1] >> 8) * 0.2      ; fy = int8(w[o+1] & 0xFF) * 0.2
-    fz = (w[o+2] >> 8) * 0.2          ; status8 = w[o+2] & 0xFF   # b0 = valid
+v    = source register                            # int16, ×100 scale
+v    = max(v, 0)                                  # Px and Fz only
+q    = (v >= 0) ? (v + 10) / 20 : (v - 10) / 20   # ÷20, round half away from zero
+q    = clamp(q, lo, hi)                           # Px, Fz: 0..255 · Py, Fx, Fy: −128..127
+byte = q & 0xFF
 ```
+
+**Host decoding**:
+
+```
+Px [mm] = byte × 0.2              Fz [N]     = byte × 0.2          # uint8
+Py [mm] = int8(byte) × 0.2        Fx, Fy [N] = int8(byte) × 0.2    # int8: byte ≥ 128 → byte − 256
+```
+
+**Conversion examples**
+
+| Field | Source register | Physical | ÷ 20, rounded | After clamp | Byte | Decoded |
+|---|---|---|---|---|---|---|
+| `Px` | 1523 | 15.23 mm | 76 | 76 | `0x4C` | 15.2 mm |
+| `Px` | 0 | no contact point | 0 | 0 | `0x00` | 0 = no contact point |
+| `Py` | −412 | −4.12 mm | −21 | −21 | `0xEB` | −4.2 mm |
+| `Fx` | −87 | −0.87 N | −4 | −4 | `0xFC` | −0.8 N |
+| `Fy` | 230 | 2.30 N | 12 (11.5 → 12) | 12 | `0x0C` | 2.4 N |
+| `Fz` | 1234 | 12.34 N | 62 | 62 | `0x3E` | 12.4 N |
+| `Fz` | 9 | 0.09 N | 0 | 0 | `0x00` | 0.0 N |
+| `Fz` | 10 | 0.10 N | 1 (0.5 → 1) | 1 | `0x01` | 0.2 N |
+| `Fz` | −15 | −0.15 N (after tare) | 0 (negative → 0 first) | 0 | `0x00` | 0.0 N |
+| `Fx` | −3000 | −30.00 N | −150 | **−128** | `0x80` | −25.6 N |
+| `Fz` | 6000 | 60.00 N | 300 | **255** | `0xFF` | 51.0 N |
+
+- **Resolution**: inside the range the error is at most ±0.1 mm / ±0.1 N;
+  values smaller than that read 0.
+- **Range**: positions always fit — the cell area spans X 0..32 mm
+  (`Px` 0..160) and Y ±12.5 mm (`Py` ±63). Forces clamp beyond 51.0 N
+  (Fz) and +25.4 / −25.6 N (Fx, Fy) and stay at the end value; how a clamp
+  is flagged belongs to the tactile status (`status8`, under development).
+- Fz is floored at 0, so a slightly negative reading after tare shows 0.
+
+#### Tactile status (`status8`) — (개발중, 구현 예정)
+
+The low byte of `0x02C5` / `0x02C8` is reserved for the tactile status
+(validity, connection, saturation, contact). Its definition is not fixed
+yet — **under development, to be implemented**. Don't rely on its bits for
+now.
+
+택타일 status(`status8`)는 아직 정의가 확정되지 않았습니다 — 개발 중이며 구현 예정입니다.
+
+#### Wire example / 프레임 예
+
+Slave 1, read 10 registers from `0x02C0`:
+
+```
+Request : 01 03 02 C0 00 0A C4 49
+Response: 01 03 14 00 BB 00 C8 00 25 4C EB FC 0C 3E 69 00 00 00 00 00 48 00 00 37 14
+```
+
+| Register | Word | Decoded |
+|---|---|---|
+| `0x02C0` | `00 BB` | STATUS: gACT 1, gHOM 1, gGTO 1, gSTA 3 (Active), gOBJ 2 (stopped on an object while closing) |
+| `0x02C1` | `00 C8` | gPO = 200 |
+| `0x02C2` | `00 25` | gCU = 37 |
+| `0x02C3` | `4C EB` | right Px = 76 × 0.2 = **15.2 mm** · Py = int8(0xEB) = −21 → **−4.2 mm** |
+| `0x02C4` | `FC 0C` | right Fx = int8(0xFC) = −4 → **−0.8 N** · Fy = 12 → **2.4 N** |
+| `0x02C5` | `3E 69` | right Fz = 62 → **12.4 N** · status8 `0x69` (개발중 — not defined yet) |
+| `0x02C6`–`0x02C7` | `00 00 00 00` | left values 0 (no valid reading) |
+| `0x02C8` | `00 48` | left Fz = 0 · status8 `0x48` (개발중 — not defined yet) |
+| `0x02C9` | `00 00` | gFLT = 0 |
+
+At full resolution (`0x0221~0x0225`) the right tip of this example reads
+POSX 1523, POSY −412, FX −87, FY 230, FZ 1234 (15.23 mm, −4.12 mm,
+−0.87 N, 2.30 N, 12.34 N).
+
+#### Polling rate and bus timing / 폴링 주기
+
+One poll is an 8-byte request plus a 25-byte response (23 bytes for 9
+registers), 10 bits per byte (8N1), plus the firmware's response delay
+and the host's own delay.
+
+| Baud | Line time (10 regs) | + Firmware response delay | ≈ Minimum cycle | |
+|---|---|---|---|---|
+| 115200 | 2.87 ms | 0.65 – 0.9 ms | 3.5 – 3.8 ms | measured 4.0 ms |
+| 230400 | 1.43 ms | 0.65 – 0.9 ms | 2.1 – 2.3 ms | estimate ⚠ |
+| 460800 | 0.72 ms | 0.65 – 0.9 ms | 1.4 – 1.6 ms | estimate ⚠ |
+| 921600 / 1000000 | 0.36 / 0.33 ms | 0.65 – 0.9 ms | 1.0 – 1.3 ms | estimate ⚠ |
+
+- The firmware response delay comes from a fixed 500 µs end-of-frame
+  timer plus the 5 kHz Modbus task tick. It does not shrink with the baud
+  rate, so above ~460800 it dominates the cycle.
+- Rows above 115200 depend on the baud-rate change, which is **under
+  development** — see [Baud rate change](#baud-rate-change--보율-변경-개발중-구현-예정).
+- **USB adapter latency**: FTDI adapters hold short replies for up to
+  their latency timer, which defaults to **16 ms** — that alone caps
+  polling near 60 Hz. Set it to 1 ms: Linux
+  `echo 1 | sudo tee /sys/bus/usb-serial/devices/ttyUSB0/latency_timer`
+  (persistent udev rule: [ros2/README.md](ros2/README.md#troubleshooting));
+  Windows: Device Manager → the COM port → Port Settings → Advanced →
+  Latency Timer = 1.
+- **C++ SDK**: waits the Modbus-standard 1.75 ms after each transaction
+  before sending the next one, so back-to-back `readFastState()` calls take
+  about cycle + 1.75 ms (≈ 5.3–5.8 ms, ~175–190 Hz at 115200 — estimate). The
+  Python SDK's rate has not been measured.
+- Tactile data arrives at 100 Hz, so 100–200 Hz polling captures every
+  tactile frame; faster polling mainly helps gripper status. The block
+  has no frame counter — read `RXCNT` (`0x0227` / `0x022F`) to tell a new
+  tactile frame from a repeat.
+- Several grippers on one RS485 bus share the wire: each gripper is one
+  block read, so the cycle grows with the number of grippers.
+
+#### Baud rate change / 보율 변경 (개발중, 구현 예정)
+
+**Under development — to be implemented.** Use the default 115200 bps
+(8N1) for now. Planned procedure:
+
+1. Write the new rate as raw bps split into two words:
+   `CFG_MB_BAUD_LO` (`0x0183`) = low 16 bits, `CFG_MB_BAUD_HI` (`0x0184`)
+   = high 16 bits — e.g. 1000000 → `0x4240` / `0x000F`, 921600 →
+   `0x1000` / `0x000E`.
+2. Write `DEV_CMD` (`0x0180`) = `0x02` (`SAVE_CONFIG`) and check
+   `DEV_STATUS` (`0x0181`) = 2 (OK). A rate outside the supported list
+   fails (3 = ERROR) and nothing is saved.
+3. Power-cycle the gripper and reconnect at the new rate — the UART
+   switches only at the next boot.
+
+- Planned rates: 9600 · 19200 · 38400 · 57600 · 115200 · 230400 · 460800 ·
+  921600 · 1000000 bps, 8N1.
+- Check that your USB-RS485 adapter supports the rate **before** saving
+  it; otherwise you need an adapter that does to change it back.
+- Every device on one RS485 bus must use the same rate.
+- A higher rate only shortens the line time; the firmware response delay
+  (0.65 – 0.9 ms) stays, so 1 Mbps brings a poll from ~4 ms to roughly
+  1.0 – 1.3 ms (estimate), not a 9× speed-up.
+
+보율 변경은 개발 중이며 구현 예정입니다. 지금은 기본 115200 bps(8N1)를 사용하세요.
 
 ### Key `DEV_CMD` codes (`0x0180`)
 
