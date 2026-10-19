@@ -88,10 +88,18 @@ cmake -B build -DAIDIN_BUILD_EXAMPLES=OFF
 | `activate()`                                         | Set rACT=1, wait until gripper reports `Active` |
 | `stop()`                                             | Stop an in-flight motion (rGTO=0), keep holding |
 | `home(timeout=15s)`                                  | Trigger homing, block until `gHOM=1` |
+| `fullInit(timeout=30s)`                              | Full initialization (`ACTION=0xA5`, protocol v1.12.0): activate + stroke calibration — full stroke sweep ×2, measured stroke flash-saved (read at `0x018B`) |
+| `setTrajLimits(maxVel, maxAcc)`                      | Trajectory limits (protocol v1.11.0, RAM only): vel 1..150 rad/s, acc 1..800 rad/s² — applied via `DEV_CMD 0x0E` |
 | `moveTo(pos, speed, force, blocking, timeout=5s)`    | Position 0=open … 255=close. Re-issuing the same position pulses rGTO (v1.9.1 semantics) |
 | `emergencyRelease(closeDirection=false)`             | Pulse rATR while keeping rACT set |
 | `readState() -> GripperState`                        | Snapshot gACT, gHOM, gSTA, gOBJ, gPO, gCU, gSP, gV, gFLT |
 | `isAtTarget()` / `hasFault()`                        | Convenience predicates |
+| `readFastState() -> FastState`                       | Fast-poll block `0x02C0` (fw ≥ v1.15.0): status, position, current, fault + both tips' tactile (8-bit) in **one** read |
+| `readTactile() -> TactilePair`                       | Both fingertips' tactile resultant from `0x0220~`: `[0]` right, `[1]` left — contact point [mm], Fx/Fy/Fz [N], `link()` |
+| `readTactileRaw(tip) -> TactileRaw`                  | One tip's raw 69-channel stream (bring-up); `tip` = `reg::TACT_TIP_RIGHT` / `TACT_TIP_LEFT` |
+| `tactileZero(tips=both)`                             | Sensor no-load zero (fw ≥ v1.17.0) — pads untouched; tip reads `Waiting` ~1.25 s, then `Live` |
+| `tactileCommand(code, tips, arg=0)`                  | Any structured tactile command (`reg::TACT_SCMD_*`) |
+| `sensorZero()`                                       | Firmware software tare (`DEV_CMD 0x08`) of Fx/Fy/Fz, RAM only |
 | `readRegister(addr)` / `writeRegister(addr, value)`  | Raw Modbus access (for installer / factory tooling) |
 
 All methods throw `aidin::GripperError` (derived from `std::runtime_error`)
@@ -124,6 +132,8 @@ internal mutex, so driving both grippers from separate threads is safe too.
 | `examples/01_activate_and_home.cpp` | Minimal startup sequence |
 | `examples/02_open_close_loop.cpp`   | Repeated open/close with blocking moves and SIGINT handling |
 | `examples/03_status_monitor.cpp`    | 100 ms polling of state changes |
+| `examples/04_tactile_monitor.cpp`   | Fingertip tactile sensors: link state, `--zero`, stream contact point + force @ 20 Hz |
+| `examples/05_fast_poll.cpp`         | Fast-poll block `0x02C0` as fast as the bus allows, prints the achieved rate |
 
 ## Register map reference
 
@@ -144,6 +154,12 @@ firmware-side definitions (firmware repo `aidin-bldc-firmware`:
 | 0x0204 | read  | gCU (actual current) |
 | 0x0205 | read  | gSP (actual speed) |
 | 0x0206 | read  | gV  (supply voltage, 0.1 V units) |
+| 0x0220~0x022F | read | tactile, right tip then left tip: status, posX/posY [mm×100], Fx/Fy/Fz [N×100], rate, count |
+| 0x02C0~0x02C9 | read | fast-poll block: status, gPO, gCU, both tips' tactile (8-bit), gFLT |
+
+Tactile and fast-block details (bits, coordinate frame, link states,
+8-bit decoding): [MANUAL.md §7.5–7.6](MANUAL.md#75-tactile-sensor-registers)
+and the [root README](../README.md#tactile-sensor--촉각-센서-0x0220).
 
 ## Troubleshooting
 

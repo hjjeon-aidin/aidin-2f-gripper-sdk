@@ -19,6 +19,50 @@ constexpr auto kPollInterval = std::chrono::milliseconds(20);
 // pulse (protocol.md §1, v1.9.1) — hold each edge for this long.
 constexpr auto kEdgePulse = std::chrono::milliseconds(20);
 
+GripperStage stageOf(uint16_t st) {
+    switch (st & reg::GSTA_MASK) {
+        case reg::GSTA_INIT:   return GripperStage::Activating;
+        case reg::GSTA_ACTIVE: return GripperStage::Active;
+        default:               return GripperStage::Reset;
+    }
+}
+
+ObjectState objectOf(uint16_t st) {
+    switch (st & reg::GOBJ_MASK) {
+        case reg::GOBJ_OPEN:   return ObjectState::OpenContact;
+        case reg::GOBJ_CLOSE:  return ObjectState::ClosedContact;
+        case reg::GOBJ_TARGET: return ObjectState::AtTarget;
+        default:               return ObjectState::Moving;
+    }
+}
+
+TactileTip tactileFlags(uint16_t st) {
+    TactileTip t;
+    t.status    = st;
+    t.valid     = (st & reg::TACT_ST_VALID)      != 0;
+    t.saturated = (st & reg::TACT_ST_SATURATED)  != 0;
+    t.timeout   = (st & reg::TACT_ST_TIMEOUT)    != 0;
+    t.connected = (st & reg::TACT_ST_CONNECTED)  != 0;
+    t.rawStream = (st & reg::TACT_ST_RAW_STREAM) != 0;
+    t.contact   = (st & reg::TACT_ST_CONTACT)    != 0;
+    t.seen      = (st & reg::TACT_ST_SEEN)       != 0;
+    t.rawFresh  = (st & reg::TACT_ST_RAW_FRESH)  != 0;
+    return t;
+}
+
+// One tip of the fast block: (Px8,Py8) (Fx8,Fy8) (Fz8,status8), high byte first.
+TactileTip fastTip(const uint16_t* w) {
+    TactileTip t = tactileFlags(static_cast<uint16_t>((w[2] & 0xFF) << 8));  // status8 = TACT_STATUS[15:8]
+    const auto s8 = [](uint16_t b) { return static_cast<float>(static_cast<int8_t>(b & 0xFF)); };
+    const auto u8 = [](uint16_t b) { return static_cast<float>(b & 0xFF); };
+    t.posX = u8(w[0] >> 8) * reg::FAST_TACT_LSB;
+    t.posY = s8(w[0])      * reg::FAST_TACT_LSB;
+    t.fx   = s8(w[1] >> 8) * reg::FAST_TACT_LSB;
+    t.fy   = s8(w[1])      * reg::FAST_TACT_LSB;
+    t.fz   = u8(w[2] >> 8) * reg::FAST_TACT_LSB;
+    return t;
+}
+
 std::string hexAddr(uint16_t addr) {
     static const char* digits = "0123456789ABCDEF";
     std::string s = "0x";
@@ -94,6 +138,34 @@ struct Gripper::Impl {
         if (!shared->bus.readHolding(slaveId, addr, count, out)) {
             throw GripperError("read block " + hexAddr(addr) + " failed: " + shared->bus.lastError());
         }
+    }
+
+    void writeBlock(uint16_t addr, const uint16_t* values, uint16_t count) {
+        if (!shared) throw GripperError("not connected");
+        std::lock_guard<std::mutex> lock(shared->mutex);
+        if (!shared->bus.writeMultiple(slaveId, addr, values, count)) {
+            throw GripperError("write block " + hexAddr(addr) + " failed: " + shared->bus.lastError());
+        }
+    }
+
+    // Issue an instant DEV_CMD and wait for OK; throw on ERROR or timeout.
+    void runDevCmd(uint16_t code, const std::string& name,
+                   const std::string& rejectHint = "DEV_STATUS=ERROR") {
+        write1(reg::DEV_CMD, code);
+        // The firmware runs DEV_CMD in its main loop and only overwrites
+        // DEV_STATUS with the result (never resets it on write) — give it a
+        // moment so we don't read back a previous command's status.
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+        while (std::chrono::steady_clock::now() < deadline) {
+            const uint16_t dev = read1(reg::DEV_STATUS);
+            if (dev == reg::DEV_STATUS_OK) return;
+            if (dev == reg::DEV_STATUS_ERROR) {
+                throw GripperError(name + " rejected (" + rejectHint + ")");
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+        throw GripperError(name + " timeout");
     }
 };
 
@@ -208,6 +280,47 @@ void Gripper::home(std::chrono::milliseconds timeout) {
     throw GripperError("home timeout");
 }
 
+void Gripper::fullInit(std::chrono::milliseconds timeout) {
+    // DH-compatible full init: writing exactly 0xA5 to ACTION triggers stroke
+    // calibration. The trigger is edge-detected on the written VALUE, so write
+    // plain rACT first to guarantee a fresh edge regardless of prior state.
+    p_->write1(reg::ACTION, reg::RACT);
+    std::this_thread::sleep_for(kEdgePulse);
+    p_->write1(reg::ACTION, reg::ACTION_FULL_INIT);
+
+    // DEV_STATUS may still hold a previous command's OK — only trust a
+    // terminal value after RUNNING has been observed. A rejection (already
+    // homing/calibrating) reports ERROR without ever showing RUNNING.
+    bool sawRunning = false;
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        const auto s = readState();
+        if (s.fault) {
+            throw GripperError("full-init fault code=" + std::to_string(s.fault));
+        }
+        const uint16_t dev = p_->read1(reg::DEV_STATUS);
+        if (dev == reg::DEV_STATUS_RUNNING) sawRunning = true;
+        if (dev == reg::DEV_STATUS_ERROR) {
+            p_->write1(reg::ACTION, reg::RACT);
+            throw GripperError("full-init rejected or failed (DEV_STATUS=ERROR)");
+        }
+        if (sawRunning && dev == reg::DEV_STATUS_OK && s.homed) {
+            p_->write1(reg::ACTION, reg::RACT);    // fresh value edge for next call
+            return;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    p_->write1(reg::ACTION, reg::RACT);
+    throw GripperError("full-init timeout");
+}
+
+void Gripper::setTrajLimits(uint16_t maxVel, uint16_t maxAcc) {
+    p_->write1(reg::TRAJ_MAX_VEL, maxVel);
+    p_->write1(reg::TRAJ_MAX_ACC, maxAcc);
+    p_->runDevCmd(reg::DEV_CMD_TRAJ_APPLY, "traj-apply",
+                  "vel 1..150, acc 1..800, not during homing/cal");
+}
+
 void Gripper::moveTo(uint8_t position,
                      uint8_t speed,
                      uint8_t force,
@@ -267,19 +380,8 @@ GripperState Gripper::readState() {
     s.activated  = (st & reg::GACT) != 0;
     s.homed      = (st & reg::GHOM) != 0;
     s.goToActive = (st & reg::GGTO) != 0;
-
-    switch (st & reg::GSTA_MASK) {
-        case reg::GSTA_RESET:  s.stage = GripperStage::Reset;      break;
-        case reg::GSTA_INIT:   s.stage = GripperStage::Activating; break;
-        case reg::GSTA_ACTIVE: s.stage = GripperStage::Active;     break;
-        default:               s.stage = GripperStage::Reset;      break;
-    }
-    switch (st & reg::GOBJ_MASK) {
-        case reg::GOBJ_MOVING: s.object = ObjectState::Moving;        break;
-        case reg::GOBJ_OPEN:   s.object = ObjectState::OpenContact;   break;
-        case reg::GOBJ_CLOSE:  s.object = ObjectState::ClosedContact; break;
-        case reg::GOBJ_TARGET: s.object = ObjectState::AtTarget;      break;
-    }
+    s.stage      = stageOf(st);
+    s.object     = objectOf(st);
 
     s.fault        = static_cast<uint8_t>(buf[1] & 0xFF);
     s.positionEcho = static_cast<uint8_t>(buf[2] & 0xFF);
@@ -293,6 +395,85 @@ GripperState Gripper::readState() {
 
 bool Gripper::isAtTarget() { return readState().object == ObjectState::AtTarget; }
 bool Gripper::hasFault()   { return readState().fault != 0; }
+
+FastState Gripper::readFastState() {
+    // 0x02C0..0x02C9: [STATUS][gPO][gCU][right x3][left x3][gFLT], one transaction.
+    std::array<uint16_t, reg::FAST_WORDS> buf{};
+    p_->readBlock(reg::FAST_BLOCK, static_cast<uint16_t>(buf.size()), buf.data());
+
+    FastState s;
+    const uint16_t st = buf[0];
+    s.activated  = (st & reg::GACT) != 0;
+    s.homed      = (st & reg::GHOM) != 0;
+    s.goToActive = (st & reg::GGTO) != 0;
+    s.stage      = stageOf(st);
+    s.object     = objectOf(st);
+    s.position   = static_cast<uint8_t>(buf[1] & 0xFF);
+    s.current    = static_cast<uint8_t>(buf[2] & 0xFF);
+    s.right      = fastTip(&buf[3]);
+    s.left       = fastTip(&buf[6]);
+    s.fault      = static_cast<uint8_t>(buf[9] & 0xFF);
+    return s;
+}
+
+TactilePair Gripper::readTactile() {
+    // 0x0220..0x022F: per tip [status][posX][posY][fx][fy][fz][rate][rxcnt].
+    std::array<uint16_t, 2 * reg::TACT_TIP_WORDS> buf{};
+    p_->readBlock(reg::TACT1_STATUS, static_cast<uint16_t>(buf.size()), buf.data());
+
+    const auto s16 = [](uint16_t v) { return static_cast<float>(static_cast<int16_t>(v)); };
+    TactilePair tips;
+    for (size_t i = 0; i < tips.size(); ++i) {
+        const uint16_t* w = &buf[i * reg::TACT_TIP_WORDS];
+        TactileTip t = tactileFlags(w[0]);
+        t.posX    = s16(w[1]) / reg::TACT_POS_SCALE;
+        t.posY    = s16(w[2]) / reg::TACT_POS_SCALE;
+        t.fx      = s16(w[3]) / reg::TACT_FORCE_SCALE;
+        t.fy      = s16(w[4]) / reg::TACT_FORCE_SCALE;
+        t.fz      = s16(w[5]) / reg::TACT_FORCE_SCALE;
+        t.rateHz  = w[6];
+        t.rxCount = w[7];
+        tips[i] = t;
+    }
+    return tips;
+}
+
+TactileRaw Gripper::readTactileRaw(uint16_t tip) {
+    if (tip != reg::TACT_TIP_RIGHT && tip != reg::TACT_TIP_LEFT) {
+        throw GripperError("readTactileRaw: tip must be TACT_TIP_RIGHT or TACT_TIP_LEFT");
+    }
+    std::array<uint16_t, reg::TACT_RAW_WORDS> buf{};
+    p_->readBlock(tip == reg::TACT_TIP_RIGHT ? reg::TACT1_RAW : reg::TACT2_RAW,
+                  static_cast<uint16_t>(buf.size()), buf.data());
+
+    TactileRaw r;
+    r.sets = buf[0];
+    r.diag = buf[1];
+    for (size_t i = 0; i < r.channels.size(); ++i) {
+        r.channels[i] = static_cast<int16_t>(buf[2 + i]);
+    }
+    for (size_t g = 0; g < r.groups.size(); ++g) {
+        r.groups[g] = r.channels[3 * g] + r.channels[3 * g + 1] + r.channels[3 * g + 2];
+    }
+    return r;
+}
+
+void Gripper::tactileZero(uint16_t tips) {
+    tactileCommand(reg::TACT_SCMD_ZERO, tips);
+}
+
+void Gripper::tactileCommand(uint16_t code, uint16_t tips, uint16_t arg) {
+    if (tips < 1 || tips > reg::TACT_TIP_BOTH) {
+        throw GripperError("tactileCommand: tips must be a TACT_TIP_* bitmask (1..3)");
+    }
+    const uint16_t block[3] = {code, tips, arg};
+    p_->writeBlock(reg::TACT_SCMD_CODE, block, 3);
+    p_->runDevCmd(reg::DEV_CMD_TACTILE_CMD, "tactile command");
+}
+
+void Gripper::sensorZero() {
+    p_->runDevCmd(reg::DEV_CMD_SENSOR_ZERO, "sensor-zero");
+}
 
 uint16_t Gripper::readRegister(uint16_t pduAddr) {
     return p_->read1(pduAddr);

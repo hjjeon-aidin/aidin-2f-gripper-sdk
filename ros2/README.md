@@ -129,6 +129,9 @@ ros2 run aidin_gripper_examples open_close_loop 5
 
 # Interactive REPL
 ros2 run aidin_gripper_examples interactive_cli
+
+# Fingertip tactile sensors (driver launched with publish_tactile:=true)
+ros2 run aidin_gripper_examples tactile_listener
 ```
 
 ---
@@ -138,6 +141,7 @@ ros2 run aidin_gripper_examples interactive_cli
 | Topic                                  | Type                                       | Frequency |
 |----------------------------------------|--------------------------------------------|-----------|
 | `/aidin_gripper_driver/state`          | `aidin_gripper_msgs/msg/GripperState`      | 50 Hz (configurable) |
+| `/aidin_gripper_driver/tactile`        | `aidin_gripper_msgs/msg/TactileState`      | same as `/state`, only with `publish_tactile:=true` |
 
 ### `GripperState` fields
 
@@ -157,6 +161,40 @@ ros2 run aidin_gripper_examples interactive_cli
 | `speed`             | uint8    | gSP (0..255 raw) |
 | `voltage`           | float32  | gV × 0.1 [V] |
 
+### `TactileState` fields (fingertip tactile sensors)
+
+Needs firmware protocol ≥ v1.18.0 and the gripper's sensor type set to
+tactile (`CFG_SENSOR_TYPE` `0x018A` = 2, `SAVE_CONFIG`, power-cycle — e.g.
+with `python/examples/08_tactile_sensor.py PORT --enable`). Launch with
+`publish_tactile:=true`; each cycle the driver then also reads
+`0x0220~0x022F` (one 16-register transaction). If the sensor type is not
+tactile the driver logs a warning and both tips report `LINK_NOT_DETECTED`.
+
+| Field    | Type         | Notes |
+|----------|--------------|-------|
+| `header` | `std_msgs/Header` | stamp + `frame_id="aidin_gripper"` |
+| `right`  | `TactileTip` | tip 1 (right finger) |
+| `left`   | `TactileTip` | tip 2 (left finger) |
+
+`TactileTip`:
+
+| Field       | Type    | Notes |
+|-------------|---------|-------|
+| `link`      | uint8   | `LINK_NOT_DETECTED=0` (never seen / sensor type ≠ 2), `LINK_DISCONNECTED=1`, `LINK_RAW_STREAM=2` (sensor sends raw channels), `LINK_WAITING=3` (zeroing: ~4.5 s after power-up, ~1.25 s after `tactile_zero`), `LINK_LIVE=4` |
+| `valid`     | bool    | values are valid (all values are 0 otherwise) |
+| `contact`   | bool    | valid and `fz` ≥ 0.5 N |
+| `saturated` | bool    | a value hit its limit / sensor over-range |
+| `pos_x`     | float32 | contact point [mm], 0..32 from the wrist-side edge of the cell area toward the fingertip — **0 = no contact point** |
+| `pos_y`     | float32 | contact point [mm], ±12.5 across the pad width |
+| `fx` / `fy` | float32 | shear force [N] along +`pos_x` / +`pos_y`, after tare |
+| `fz`        | float32 | normal force [N], positive = pressing, after tare |
+| `rate_hz`   | uint16  | result frames received in the last second (≈ 100) |
+| `status`    | uint16  | raw `TACT_STATUS` register (bits in the [root README](../README.md#tactile-sensor--촉각-센서-0x0220)) |
+
+The fast-poll block (`0x02C0`, status + tactile in one read) is exposed
+by the C++/Python SDKs (`readFastState()` / `read_fast_state()`), not by
+this driver.
+
 ---
 
 ## ROS2 Services
@@ -166,10 +204,12 @@ ros2 run aidin_gripper_examples interactive_cli
 | `/aidin_gripper_driver/activate`                 | `std_srvs/srv/Trigger`                       | Set `rACT=1`, wait until `gSTA=Active` |
 | `/aidin_gripper_driver/deactivate`               | `std_srvs/srv/Trigger`                       | Set `rACT=0` |
 | `/aidin_gripper_driver/home`                     | `std_srvs/srv/Trigger`                       | Rising-edge `rHOM`, block until `gHOM=1` |
+| `/aidin_gripper_driver/full_init`                | `std_srvs/srv/Trigger`                       | Full initialization (`ACTION=0xA5`, protocol v1.12.0): activate + stroke calibration — **full stroke sweep ×2, keep the workspace clear** |
 | `/aidin_gripper_driver/stop`                     | `std_srvs/srv/Trigger`                       | Stop an in-flight motion (`rGTO=0`), keep holding |
 | `/aidin_gripper_driver/fault_clear`              | `std_srvs/srv/Trigger`                       | Clear the latched fault `gFLTO` (DEV_CMD 0x07) |
 | `/aidin_gripper_driver/move_to`                  | `aidin_gripper_msgs/srv/MoveTo`              | Position / speed / force command. Same-position re-issue pulses `rGTO` (protocol v1.9.1) |
 | `/aidin_gripper_driver/emergency_release`        | `aidin_gripper_msgs/srv/EmergencyRelease`    | rATR pulse release (open or close direction) |
+| `/aidin_gripper_driver/tactile_zero`             | `std_srvs/srv/Trigger`                       | Tactile sensor no-load zero on both tips (protocol v1.17.0+) — **pads untouched**; each tip reads `LINK_WAITING` ~1.25 s, then `LINK_LIVE`. Fails while force control uses the sensor as feedback |
 | `/aidin_gripper_driver/dev_cmd`                  | `aidin_gripper_msgs/srv/DevCmd`              | Developer command passthrough (firmware repo `protocol.md` §3). **Compile out with `-DAIDIN_ENABLE_DEV_CMD=OFF`** |
 
 ### Service request structure
@@ -179,10 +219,12 @@ ros2 run aidin_gripper_examples interactive_cli
 | `activate`           | _(empty)_                                                              | — |
 | `deactivate`         | _(empty)_                                                              | — |
 | `home`               | _(empty)_                                                              | — |
+| `full_init`          | _(empty)_                                                              | — |
 | `stop`               | _(empty)_                                                              | — |
 | `fault_clear`        | _(empty)_                                                              | — |
 | `move_to`            | `position` (uint8), `speed` (uint8), `force` (uint8), `blocking` (bool), `timeout_sec` (float32) | position 0..255 (0=open, 255=close); speed 0..255; force 0..255 |
 | `emergency_release`  | `close_direction` (bool)                                               | false = open, true = close |
+| `tactile_zero`       | _(empty)_                                                              | — |
 | `dev_cmd`            | `cmd` (uint8), `timeout_sec` (float32)                                 | cmd = protocol.md §3 코드 (예: 0x0A STROKE_CAL — timeout_sec 25 권장) |
 
 ### Examples from the command line
@@ -190,12 +232,17 @@ ros2 run aidin_gripper_examples interactive_cli
 ```bash
 ros2 service call /aidin_gripper_driver/activate std_srvs/srv/Trigger
 ros2 service call /aidin_gripper_driver/home     std_srvs/srv/Trigger
+ros2 service call /aidin_gripper_driver/full_init std_srvs/srv/Trigger   # stroke cal — workspace clear!
 
 ros2 service call /aidin_gripper_driver/move_to aidin_gripper_msgs/srv/MoveTo \
     "{position: 200, speed: 180, force: 128, blocking: true, timeout_sec: 5.0}"
 
 ros2 service call /aidin_gripper_driver/emergency_release \
     aidin_gripper_msgs/srv/EmergencyRelease "{close_direction: false}"
+
+# Tactile sensors: launch with publish_tactile:=true, then
+ros2 topic echo /aidin_gripper_driver/tactile
+ros2 service call /aidin_gripper_driver/tactile_zero std_srvs/srv/Trigger   # pads untouched!
 ```
 
 ---
@@ -213,6 +260,7 @@ Set via `config/default.yaml` or on the command line.
 | `publish_rate_hz`    | double  | `50.0`           | `/state` publish rate |
 | `auto_activate`      | bool    | `true`           | Call `activate()` at startup |
 | `auto_home`          | bool    | `false`          | Call `home()` at startup (be careful — moves the fingers) |
+| `publish_tactile`    | bool    | `false`          | Also publish `/tactile` at `publish_rate_hz` (fingertip tactile sensors). Launch argument `publish_tactile:=true` overrides the YAML |
 
 ---
 

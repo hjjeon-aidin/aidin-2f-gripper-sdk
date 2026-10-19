@@ -14,7 +14,7 @@ AIDIN 2지 BLDC 그리퍼용 호스트 소프트웨어 모음입니다. USB-RS48
 |---|---|---|
 | [`cpp/`](cpp/) | `aidin::Gripper` C++17 SDK — self-contained Modbus RTU framing (termios / Win32). Builds on Ubuntu & Windows with one CMake command | [README](cpp/README.md) · [MANUAL](cpp/MANUAL.md) |
 | [`python/`](python/) | Pure-Python SDK (`pyserial`) — same API surface as the C++ SDK | [README](python/README.md) |
-| [`ros2/`](ros2/) | ROS2 packages: `aidin_gripper_driver` (rclcpp node), `aidin_gripper_msgs`, `aidin_gripper_examples`. State topic @ 50 Hz + services (`activate`/`home`/`move_to`/`emergency_release`/…) | [README](ros2/README.md) |
+| [`ros2/`](ros2/) | ROS2 packages: `aidin_gripper_driver` (rclcpp node), `aidin_gripper_msgs`, `aidin_gripper_examples`. State topic @ 50 Hz + optional tactile topic + services (`activate`/`home`/`move_to`/`emergency_release`/`tactile_zero`/…) | [README](ros2/README.md) |
 | [`urdf/`](urdf/) | `aidin_gripper_description` ROS2 package — URDF + meshes for the gripper end-effector | [ros2/README.md](ros2/README.md#workspace-layout) |
 
 ## Gripper operating procedure / 그리퍼 실행 절차
@@ -34,6 +34,8 @@ same order, regardless of which interface you pick.
 | 4 | Home / 호밍 | `g.home()` | `.../home` service (or `auto_home:=true`) | `rHOM` rising edge, wait `gHOM=1` — **keep hands clear, fingers seek a hard stop / 손을 가까이 두지 마세요** |
 | 5 | Move (open/close) / 이동 | `g.move_to(pos, speed, force, blocking=True)` | `.../move_to` (`MoveTo` service) | `rPR`/`rSP`/`rFR` + `rGTO` |
 | 6 | Monitor status / 상태 모니터링 | `g.read_state()` | subscribe `/aidin_gripper_driver/state` | `gSTA`/`gOBJ`/`gPO`/`gFLT` |
+| (opt) | Tactile sensors / 촉각 센서 | `g.read_tactile()` | `publish_tactile:=true` → `/aidin_gripper_driver/tactile` | `0x0220~` — see [Tactile sensor](#tactile-sensor--촉각-센서-0x0220) |
+| (opt) | Fast poll / 고속 폴링 | `g.read_fast_state()` | — (SDK only) | `0x02C0~` — see [Fast-poll block](#fast-poll-block--고속-폴링-블록-0x02c00x02c9) |
 | — | Recover from a fault/jam / 고장·끼임 복구 | `g.emergency_release(...)` then `g.activate()` again | `.../emergency_release` then `.../activate` | see each README's Troubleshooting table |
 
 Minimal Python run-through (full script with progress logging:
@@ -120,18 +122,20 @@ already exist here.
   1..247).
 - Function codes the device accepts: **0x03** (Read Holding Registers),
   **0x06** (Write Single Register), **0x10** (Write Multiple Registers).
-  The SDKs in this repo use 0x03/0x06. Every register below is a 16-bit
-  holding register at its protocol-level (PDU) address.
+  The SDKs in this repo use 0x03/0x06, plus 0x10 for the tactile
+  structured command. Every register below is a 16-bit holding register
+  at its protocol-level (PDU) address.
 - Detailed per-register documentation — bit maps, value scaling, usage
   sequences, Modbus frame examples — is in the **AIDIN Gripper Modbus RTU
-  Protocol Manual** (`aidin_modbus_rtu_manual.pdf` / `.html`, Manual Rev 2.0
-  · Spec v1.10.3, in the firmware repo `aidin-bldc-firmware/docs/`). The
-  canonical register contract is `docs/protocol/protocol.md` in the same
-  repo. Neither is included here — only the **core registers** mirrored in
+  Protocol Manual** (`aidin_modbus_rtu_manual.pdf` / `.html`, Manual Rev 2.3,
+  in the firmware repo `aidin-bldc-firmware/docs/`). The canonical register
+  contract is `docs/protocol/protocol.md` in the same repo (spec v1.18.0).
+  Neither is included here — the registers mirrored in
   [`cpp/include/aidin/registers.hpp`](cpp/include/aidin/registers.hpp) /
   [`python/aidin_gripper/registers.py`](python/aidin_gripper/registers.py)
-  are exercised by this repo's SDKs; the extended blocks below (config,
-  force control, sensors) are summarized from the manual.
+  (motion, status, tactile sensor, fast-poll block) are exercised by this
+  repo's SDKs; the other extended blocks below (config, force control,
+  F/T sensor) are summarized from the manual.
 
 ### Register map / 레지스터 맵
 
@@ -178,6 +182,14 @@ what every SDK's `read_state()` / `readState()` does.
 | 3 | `rGTO` | level, edge-sensitive re-trigger | 1 = go to `rPR`. Re-commanding the *same* position while `rGTO` is already 1 is ignored — pulse it 0→1 to force re-execution (firmware ≥ v1.9.1). |
 | 4 | `rATR` | **rising edge** | emergency auto-release. Only processed while `rACT=1`. |
 | 5 | `rADR` | level | auto-release direction: 0 = open, 1 = close. Set before/with the `rATR` pulse. |
+
+Writing the exact **value `0xA5`** to `ACTION` is special (protocol
+v1.12.0, DH-Robotics "full initialization" compatible): it triggers a
+stroke calibration — activate + open homing + close-contact stroke
+measurement, flash-saved and readable at `0x018B`. It works from the
+inactive state with a single write (the value includes the `rACT` bit) and
+is edge-detected on the written value. Every SDK here wraps it:
+`full_init()` / `fullInit()` / the `/full_init` service.
 
 Because `ACTION` is one register, every write replaces *all* of these bits
 at once — there is no way to set one bit without knowing (or explicitly
@@ -228,7 +240,7 @@ SAVE_CONFIG`; address/baud changes apply after a power cycle. 상세 절차는
 | `0x0180` | W | `DEV_CMD` | developer/config command code — key codes below |
 | `0x0181` | R | `DEV_STATUS` | 0 = IDLE · 1 = RUNNING · 2 = OK · 3 = ERROR |
 | `0x0182` | R/W | `CFG_MB_ADDR` | Modbus slave address, 1..247 (see "Multiple grippers on one bus" in [python/README.md](python/README.md#multiple-grippers-on-one-bus-rs485-multi-drop)) |
-| `0x0183`/`0x0184` | R | `CFG_MB_BAUD_LO/HI` | serial baud rate as 32-bit LO/HI (e.g. 115200 → `0xC200`/`0x0001`) |
+| `0x0183`/`0x0184` | R/W | `CFG_MB_BAUD_LO/HI` | serial baud rate, raw bps as 32-bit LO/HI (e.g. 115200 → `0xC200`/`0x0001`). Supported 9600 · 19200 · 38400 · 57600 · 115200 · 230400 · 460800 · 921600 · 1000000; unsupported → `SAVE_CONFIG` ERROR. Firmware protocol ≥ v1.16.0 (older firmware always runs at 115200) |
 | `0x0185`/`0x0186` | R/W | `CFG_CAN_ID` / `CFG_CAN_RATE` | FDCAN node ID / rate (1 = 1 Mbps, 2 = 500 kbps) |
 | `0x0187` | R | `CFG_DEV_TYPE` | device type (101 = AIDIN_GRIPPER) |
 | `0x0188`/`0x0189` | R | `CFG_SERIAL_LO/HI` | serial number, 32-bit LO/HI |
@@ -236,6 +248,7 @@ SAVE_CONFIG`; address/baud changes apply after a power cycle. 상세 절차는
 | `0x018B` | R | `CFG_STROKE_MRAD` | calibrated stroke [rad × 1000] — set only by `DEV_CMD 0x0A STROKE_CAL` |
 | `0x0190~0x0196` | R/W | `PID_*` | position/speed/current loop gains — tuning only, see manual |
 | `0x0197~0x019A` | R/W | `FF_*` | position feedforward gains — applied via `DEV_CMD 0x0B/0x0C` |
+| `0x019B`/`0x019C` | R/W | `TRAJ_MAX_VEL/ACC` | trajectory limits (protocol v1.11.0) — vel [rad/s] 1..150 (boot default 100), acc [rad/s²] 1..800 (boot default 400). Applied via `DEV_CMD 0x0E TRAJ_APPLY`; RAM only, reboot restores defaults |
 
 #### (지속 업데이트) Force control / 힘 제어 (`0x01A0~0x01A9`)
 
@@ -252,23 +265,166 @@ homing). 모드별 파라미터, 단위계, 안전 폴백 등 상세는 매뉴�
 | `0x01A2~0x01A4` | W | `FC_STIFFNESS` / `FC_DAMPING` / `FC_MASS` | Kx / Kb / Mv gains (× 10) |
 | `0x01A5` | W | `FC_EQUIL` | equilibrium position 0..255 (0 = open) — live-updatable while active |
 | `0x01A6` | W | `FC_SPEED_LIMIT` | speed safety limit [rad/s × 100], 0 = firmware default |
-| `0x01A7` | W | `FC_FB_SRC` | feedback source: 0 = sensorless · 1/2 = AFT tip1/tip2 Fz · 3 = tip1+tip2 · 4 = Iq self-sensing |
+| `0x01A7` | W | `FC_FB_SRC` | feedback source: 0 = sensorless · 1/2 = sensor tip1/tip2 Fz (AFT or tactile) · 3 = tip1+tip2 · 4 = Iq self-sensing |
 | `0x01A8` | R | `FC_FORCE_ACT` | measured force feedback — [N × 100] with F/T sensor source, else [mA] |
 | `0x01A9` | R | `FC_POS_ACT` | position feedback 0..255 |
 
-#### (개발중, 지속 업데이트 예정) External sensors / 외부 센서 (Read, `0x0210~`)
+#### (개발중, 지속 업데이트 예정) Fingertip sensors / 핑거팁 센서 (`0x0210~`)
 
 Fingertip sensor values relayed from CAN; select the sensor with
-`CFG_SENSOR_TYPE` (0x018A) + `SAVE_CONFIG` + power cycle. Tare with
-`DEV_CMD 0x08 SENSOR_ZERO`. 상태 비트필드와 스케일링 상세는 매뉴얼 참고.
+`CFG_SENSOR_TYPE` (0x018A: 1 = AFT F/T, 2 = tactile) + `SAVE_CONFIG` +
+power cycle. Tip 1 = **right** finger, tip 2 = **left** finger.
+상태 비트필드와 스케일링 상세는 매뉴얼 참고.
 
 | Addr | R/W | Field | Meaning |
 |---|---|---|---|
-| `0x0210~0x0216` | R | `SENSOR_STATUS`, `FT_FX..FT_TZ` | tip 1 six-axis F/T — force [N × 100], torque [Nm × 1000] |
+| `0x0210~0x0216` | R | `SENSOR_STATUS`, `FT_FX..FT_TZ` | tip 1 six-axis F/T — force [N × 100], torque [Nm × 1000]. With the tactile sensor: its Fx/Fy/Fz, torque 0 |
 | `0x0217~0x021D` | R | `SENSOR2_STATUS`, `FT2_FX..FT2_TZ` | tip 2, same layout — poll both tips as one 14-register block read |
-| `0x0220~0x0241` | R | `TACT1_*` | tip 1 tactile (AIDIN-FS) cell map — status + cell count + 32 cells [N × 100] |
-| `0x0242~0x0263` | R | `TACT2_*` | tip 2, same layout — poll both tips as one 68-register block read from `0x0220` |
-| `0x01B0~0x01B9` | W | `TACT_CMD_*` | tactile sensor CAN command buffer — transmitted with `DEV_CMD 0x09` |
+| `0x0220~0x0227` | R | `TACT1_*` | tip 1 tactile resultant: status, contact point X/Y [mm × 100], Fx/Fy/Fz [N × 100], rate [Hz], frame count — [details](#tactile-sensor--촉각-센서-0x0220) |
+| `0x0228~0x022F` | R | `TACT2_*` | tip 2, same layout — poll both tips as one 16-register block read from `0x0220` |
+| `0x0230~0x0276` / `0x0277~0x02BD` | R | `TACT1_RAW` / `TACT2_RAW` | raw 69-channel diagnostic stream per tip (bring-up only) — valid while status `raw_fresh` = 1 |
+| `0x01B0~0x01BA` | W | `TACT_CMD_*` | tactile CAN passthrough (tip, len, data[8], CAN ID) — sent as CAN FD with `DEV_CMD 0x09` |
+| `0x01BB~0x01BD` | W | `TACT_SCMD_*` | tactile structured command (code, tip bitmask, arg) — run with `DEV_CMD 0x0F` |
+| `0x02C0~0x02C9` | R | `FAST_*` | fast-poll block: status + position + current + both tips' tactile + fault in one read — [details](#fast-poll-block--고속-폴링-블록-0x02c00x02c9) |
+
+### Tactile sensor / 촉각 센서 (`0x0220~`)
+
+Firmware protocol ≥ v1.13.0 (gripper-frame coordinates below: ≥ v1.18.0).
+Each fingertip's 3-axis tactile sensor (23 cells) sends one **contact
+resultant** at 100 Hz over CAN FD: where the contact is and how hard it
+pushes. The firmware relays it as 8 registers per tip.
+
+각 핑거팁의 3축 촉각 센서(23셀)는 100 Hz 로 **접촉 합력**(작용점 + 3축 힘)을
+보내고, 펌웨어가 팁당 8개 레지스터로 전달합니다.
+
+| Offset (tip 1 / tip 2) | Field | Type | Meaning |
+|---|---|---|---|
+| `0x0220` / `0x0228` | `TACT_STATUS` | bitfield | link / validity bits — table below. Low byte = sensor type (2) |
+| `0x0221` / `0x0229` | `POSX` | int16 | contact point X [mm × 100]: **0..3200 from the wrist-side edge of the cell area toward the fingertip. 0 = no contact point** |
+| `0x0222` / `0x022A` | `POSY` | int16 | contact point Y [mm × 100]: ±1250 across the pad width (centre = 0) |
+| `0x0223` / `0x022B` | `FX` | int16 | shear force [N × 100] along +X (toward the fingertip), after tare |
+| `0x0224` / `0x022C` | `FY` | int16 | shear force [N × 100] along +Y, after tare |
+| `0x0225` / `0x022D` | `FZ` | int16 | normal force [N × 100], **positive = pressing**, after tare |
+| `0x0226` / `0x022E` | `RATE` | uint16 | result frames received in the last second [Hz] (≈ 100 when healthy) |
+| `0x0227` / `0x022F` | `RXCNT` | uint16 | result frames since boot (wraps at 65535) |
+
+`mm = POS / 100`, `N = F / 100`. While `valid` = 0 every value reads 0.
+With `valid` = 1 but a light touch (Fz < ~1 N) there is no contact point
+and `POSX = POSY = 0` — a real contact point is always `POSX` ≥ ~2.7 mm,
+so 0 never collides with a valid one. The pad is 50 × 25 mm; the cells
+cover the 32 mm toward the fingertip.
+
+**`TACT_STATUS` bits**
+
+| Bit | Mask | Name | Meaning |
+|---|---|---|---|
+| 8 | `0x0100` | `valid` | result frame within the last 50 ms and its values are valid |
+| 9 | `0x0200` | `saturated` | a value hit its int16 limit or the sensor reported over-range |
+| 10 | `0x0400` | `timeout` | no result frame for 50 ms |
+| 11 | `0x0800` | `connected` | any frame from this tip within the last 200 ms |
+| 12 | `0x1000` | `raw_stream` | connected, but the sensor sends raw channels instead of results |
+| 13 | `0x2000` | `contact` | `valid` and Fz ≥ 0.5 N |
+| 14 | `0x4000` | `seen` | detected at least once since boot |
+| 15 | `0x8000` | `raw_fresh` | raw diagnostic block (`0x0230~`) updated within 200 ms |
+
+**Link state / 연결 상태** — what to show the user (the SDKs return this as `link`):
+
+| seen | connected | valid | timeout | raw_stream | State | Meaning |
+|:-:|:-:|:-:|:-:|:-:|---|---|
+| 0 | 0 | 0 | 1 | 0 | `NOT_DETECTED` | never seen: not fitted, wiring, CAN ID mismatch, or `CFG_SENSOR_TYPE` ≠ 2 |
+| 1 | 0 | 0 | 1 | 0 | `DISCONNECTED` | was connected, frames stopped |
+| 1 | 1 | 0 | 1 | 1 | `RAW_STREAM` | connected, sensor firmware sends raw channels (no results) |
+| 1 | 1 | 0 | 0 | 0 | `WAITING` | results arrive but are invalid: sensor boot zero (~4.5 s) or right after a zero (~1.25 s) |
+| 1 | 1 | 1 | 0 | 0 | `LIVE` | normal |
+
+**How to read it / 읽는 방법**
+
+1. **Once**: write `CFG_SENSOR_TYPE` (`0x018A`) = 2 → `DEV_CMD` = `0x02`
+   (`SAVE_CONFIG`) → power-cycle. (`python examples/08_tactile_sensor.py PORT --enable`)
+2. After power-up each tip reads `WAITING` for ~4.5 s (sensor boot zero),
+   then `LIVE`.
+3. Read **16 registers from `0x0220`** (both tips, one transaction) at
+   whatever rate you need — the sensor updates at 100 Hz.
+4. **Zero** with the pads untouched: write `0x01BB` = `0x01` (ZERO),
+   `0x01BC` = tip bitmask (`0x01` right, `0x02` left, `0x03` both),
+   `0x01BD` = 0, then `DEV_CMD` = `0x0F`; `DEV_STATUS` OK = command sent.
+   The tip shows `WAITING` for ~1.25 s, then `LIVE` with the new zero.
+   It is rejected (ERROR) while force control uses the sensor as feedback.
+   `DEV_CMD 0x08 SENSOR_ZERO` is the alternative software tare (captures the
+   current Fx/Fy/Fz as zero; RAM only).
+
+| Step | Python | C++ | ROS2 |
+|---|---|---|---|
+| Read both tips | `right, left = g.read_tactile()` | `auto tips = g.readTactile();` (`[0]` right, `[1]` left) | `publish_tactile:=true`, subscribe `/aidin_gripper_driver/tactile` (`TactileState`) |
+| Link state | `right.link` → `TactileLink.LIVE` … | `tips[0].link()` → `TactileLink::Live` … | `msg.right.link` → `TactileTip.LINK_LIVE` … |
+| Sensor zero | `g.tactile_zero()` | `g.tactileZero()` | `/aidin_gripper_driver/tactile_zero` (`Trigger`) |
+| Software tare | `g.sensor_zero()` | `g.sensorZero()` | `/dev_cmd` `cmd: 8` |
+| Raw 69 channels | `g.read_tactile_raw(reg.TACT_TIP_LEFT)` | `g.readTactileRaw(reg::TACT_TIP_LEFT)` | — |
+
+> ⚠ Still being validated on hardware: the Fx/Fy sign convention assumes the
+> sensor's force and position share one frame, and the right-hand sensor's
+> zero CAN ID is not confirmed yet — for that tip the ZERO command falls back
+> to the firmware software tare. Firmware older than v1.18.0 reports
+> positions in the sensor's own frame (centre origin, rotated 180°).
+
+### Fast-poll block / 고속 폴링 블록 (`0x02C0~0x02C9`)
+
+Firmware protocol ≥ v1.15.0. A **read-only copy** of the essentials —
+gripper status, position, current, fault and both fingertips' tactile
+resultant — packed so **one FC03 read of 10 registers** returns them all.
+The firmware rewrites the 10 words in one go with interrupts briefly
+blocked, so every reply is a single consistent snapshot. The original
+addresses (`0x0200~`, `0x0220~`) stay valid.
+
+필수 값만 **FC03 한 번(10워드)** 으로 읽기 위한 특수 용도 읽기 전용 블록입니다.
+펌웨어가 10워드를 한 번에 갱신하므로 한 응답은 항상 같은 주기의 값입니다.
+
+Measured at 115200 bps: **~4.0 ms per read (max ~248 Hz)**, vs ~8.6 ms
+for reading `0x0200` and `0x0220` separately.
+
+| Addr | High byte [15:8] | Low byte [7:0] | Copy of |
+|---|---|---|---|
+| `0x02C0` | 0 | `STATUS` (same bits as `0x0200`) | `0x0200` |
+| `0x02C1` | 0 | `gPO` position 0..255 (0 = open) | `0x0203` |
+| `0x02C2` | 0 | `gCU` current 0..255 | `0x0204` |
+| `0x02C3` | right `Px8` | right `Py8` | `0x0221` / `0x0222` |
+| `0x02C4` | right `Fx8` | right `Fy8` | `0x0223` / `0x0224` |
+| `0x02C5` | right `Fz8` | right `status8` | `0x0225` / `0x0220` |
+| `0x02C6` | left `Px8` | left `Py8` | `0x0229` / `0x022A` |
+| `0x02C7` | left `Fx8` | left `Fy8` | `0x022B` / `0x022C` |
+| `0x02C8` | left `Fz8` | left `status8` | `0x022D` / `0x0228` |
+| `0x02C9` | 0 | `gFLT` fault code | `0x0201` |
+
+Tactile values are compressed to 8 bits (**1 LSB = 0.2 mm / 0.2 N**,
+draft scale ⚠ — may change once the sensor range is final):
+
+| Field | Type | Range | Decode |
+|---|---|---|---|
+| `Px8` | uint8 | 0 .. 51.0 mm | `mm = v × 0.2` (0 = no contact point) |
+| `Py8` | int8 | −25.6 .. +25.4 mm | `mm = (int8)v × 0.2` |
+| `Fx8` / `Fy8` | int8 | −25.6 .. +25.4 N | `N = (int8)v × 0.2` |
+| `Fz8` | uint8 | 0 .. 51.0 N | `N = v × 0.2` |
+| `status8` | bits | — | `TACT_STATUS >> 8`: b0 valid · b1 saturated · b2 timeout · b3 connected · b4 raw_stream · b5 contact · b6 seen · b7 raw_fresh |
+
+Out-of-range values clamp to the end value and set `saturated`. With
+`CFG_SENSOR_TYPE` ≠ 2 the six tactile words read 0. `Px8` is uint8 since
+v1.18.0 (int8 before). Writes are ignored (overwritten on the next update).
+
+| | Python | C++ |
+|---|---|---|
+| Read + decode | `s = g.read_fast_state()` → `FastState` (`s.position`, `s.current`, `s.fault`, `s.stage`, `s.right`, `s.left`) | `auto s = g.readFastState();` → `FastState` |
+| Example | [`python/examples/09_fast_poll.py`](python/examples/09_fast_poll.py) | [`cpp/examples/05_fast_poll.cpp`](cpp/examples/05_fast_poll.cpp) |
+
+Decoding by hand (any language):
+
+```
+w = read_holding(0x02C0, 10)
+status, position, current, fault = w[0], w[1] & 0xFF, w[2] & 0xFF, w[9] & 0xFF
+for tip, o in (("right", 3), ("left", 6)):
+    px = (w[o] >> 8) * 0.2            ; py = int8(w[o] & 0xFF) * 0.2
+    fx = int8(w[o+1] >> 8) * 0.2      ; fy = int8(w[o+1] & 0xFF) * 0.2
+    fz = (w[o+2] >> 8) * 0.2          ; status8 = w[o+2] & 0xFF   # b0 = valid
+```
 
 ### Key `DEV_CMD` codes (`0x0180`)
 
@@ -280,8 +436,11 @@ PID 저장/복원 등)과 절차는 매뉴얼 참고.
 |---|---|---|
 | `0x02` | `SAVE_CONFIG` | persist the config registers (`0x0182~`) to flash |
 | `0x07` | `FAULT_CLEAR` | acknowledge the motor fault + clear latched `gFLTO` |
-| `0x08` | `SENSOR_ZERO` | tare the fingertip sensors (per-session, RAM only) |
+| `0x08` | `SENSOR_ZERO` | software tare of the fingertip sensors — F/T Fx..Tz, tactile Fx/Fy/Fz (per-session, RAM only) |
+| `0x09` | `TACTILE_SEND` | send the `TACT_CMD_*` bytes (`0x01B0~`) to the tactile sensor as one CAN FD frame, uninterpreted |
 | `0x0A` | `STROKE_CAL` | re-measure the usable stroke after a fingertip change (~20 s, saved to flash) |
+| `0x0E` | `TRAJ_APPLY` | apply `TRAJ_MAX_VEL/ACC` (`0x019B/0x019C`) to the trajectory generator — RAM only; rejected (ERROR) out of range or during homing/calibration |
+| `0x0F` | `TACTILE_CMD` | run the tactile structured command in `0x01BB~0x01BD` — `0x01` ZERO (sensor no-load zero), `0x05` FACTORY_RESET (arg `0xA5A5`); `0x02~0x04` unsupported (ERROR) |
 
 > Flash-writing commands (`SAVE_CONFIG`, `SAVE_PID`, `FF_SAVE`) stall
 > Modbus for ~10 ms — use a response timeout ≥ 50 ms.
@@ -303,6 +462,12 @@ PID 저장/복원 등)과 절차는 매뉴얼 참고.
 - Treat a full status read (8 registers, `0x0200`-`0x0207`) as one
   transaction; don't split it into 8 separate reads, both for latency and
   because the fields are meant to be read as one consistent snapshot.
+  When you also need tactile data at a high rate, one read of the
+  fast-poll block (`0x02C0`, 10 registers) replaces both reads.
+- Tactile tip 1 is the **right** finger, tip 2 the **left**. A tactile
+  `POSX` of 0 means "no contact point", not "at the edge". Only zero the
+  sensor (`TACTILE_CMD` ZERO) with nothing touching the pads, and expect
+  ~1.25 s of `WAITING` (valid = 0) afterwards.
 - **RS485 multi-drop**: several grippers can share one physical bus if
   each has a distinct `CFG_MB_ADDR`, but only one Modbus transaction may
   be in flight on the wire at a time. All three SDKs in this repo share
@@ -377,6 +542,8 @@ if blocking:
 
 # status monitoring: read(STATUS..FAULT_LATCH) on whatever cadence you need
 # fault/jam recovery: write(ACTION, rATR [| rADR]) briefly, then re-run the activate step
+# tactile (CFG_SENSOR_TYPE=2): read(0x0220, 16) -> per tip [status][posX][posY][fx][fy][fz][rate][rxcnt]
+# fast poll (fw >= v1.15): read(0x02C0, 10) -> status, gPO, gCU, both tips' tactile (8-bit), gFLT
 ```
 
 ### Same algorithm, three ways (already implemented here)
@@ -386,8 +553,13 @@ if blocking:
 | Connect | `g.connect(port, baudrate, parity, slave_id)` | `g.connect(port, baud, parity, slaveId)` | `port`/`baudrate`/`parity`/`slave_id` params |
 | Activate | `g.activate()` | `g.activate()` | `/activate` (`Trigger`) |
 | Home | `g.home()` | `g.home()` | `/home` (`Trigger`) |
+| Full init (activate + stroke cal, `ACTION=0xA5`) | `g.full_init()` | `g.fullInit()` | `/full_init` (`Trigger`) |
+| Trajectory limits (RAM only) | `g.set_traj_limits(vel, acc)` | `g.setTrajLimits(vel, acc)` | registers + `/dev_cmd` (`0x0E`) |
 | Move | `g.move_to(pos, speed, force, blocking)` | `g.moveTo(pos, speed, force, blocking)` | `/move_to` (`MoveTo`) |
 | Status | `g.read_state()` → `GripperState` | `g.readState()` → `GripperState` | subscribe `/state` (`GripperState` msg, 50 Hz) |
+| Fast poll (`0x02C0`, one read) | `g.read_fast_state()` → `FastState` | `g.readFastState()` → `FastState` | — |
+| Tactile (both tips) | `g.read_tactile()` → `(right, left)` `TactileTip` | `g.readTactile()` → `TactilePair` | subscribe `/tactile` (`TactileState`, `publish_tactile:=true`) |
+| Tactile zero | `g.tactile_zero()` | `g.tactileZero()` | `/tactile_zero` (`Trigger`) |
 | Emergency release | `g.emergency_release(close_direction)` | `g.emergencyRelease(closeDirection)` | `/emergency_release` (`EmergencyRelease`) |
 | Raw register access | `g.read_register()` / `g.write_register()` | `g.readRegister()` / `g.writeRegister()` | `/dev_cmd` (opt-out, factory only) |
 | Errors | raises `GripperError` | throws `GripperError` | service `success=false` + `message` |

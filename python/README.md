@@ -70,6 +70,8 @@ pip install "pymodbus>=3.0,<4.0" pyserial
 | `examples/05_fault_and_emergency_release.py` | Inspect `fault`/`latched_fault`, call `emergency_release()`, recover with `activate()` |
 | `examples/06_full_quickstart_demo.py` | End-to-end: connect → activate → home → close → open → status |
 | `examples/07_multi_gripper_two_slaves.py` | Two grippers, one RS485 bus, two slave IDs (shared serial connection) |
+| `examples/08_tactile_sensor.py` | Fingertip tactile sensors: link state, `--zero`, stream contact point + force; `--enable` sets the sensor type once |
+| `examples/09_fast_poll.py` | Fast-poll block `0x02C0`: status + position + current + fault + both tips' tactile in one read, prints the achieved rate |
 
 ```bash
 cd examples
@@ -80,6 +82,8 @@ python 04_get_status.py                  /dev/ttyUSB0 --watch
 python 05_fault_and_emergency_release.py /dev/ttyUSB0 open
 python 06_full_quickstart_demo.py        /dev/ttyUSB0
 python 07_multi_gripper_two_slaves.py    /dev/ttyUSB0 1 2
+python 08_tactile_sensor.py              /dev/ttyUSB0 --zero
+python 09_fast_poll.py                   /dev/ttyUSB0
 ```
 
 Windows: pass `COM3` (or your actual port) instead.
@@ -137,10 +141,18 @@ wire pair as long as each has a distinct Modbus slave address.
 | `activate(timeout_s=3.0)`                                 | rACT=1, wait for ACTIVE |
 | `deactivate()`                                            | rACT=0 |
 | `home(timeout_s=15.0)`                                    | Rising-edge homing, wait for gHOM=1 |
+| `full_init(timeout_s=30.0)`                               | Full initialization (`ACTION=0xA5`, protocol v1.12.0): activate + stroke calibration — full stroke sweep ×2, stroke flash-saved (read at `0x018B`) |
+| `set_traj_limits(max_vel, max_acc)`                       | Trajectory limits (protocol v1.11.0, RAM only): vel 1..150 rad/s, acc 1..800 rad/s² — applied via `DEV_CMD 0x0E` |
 | `move_to(position, speed=128, force=128, blocking=False, timeout_s=5.0)` | Position 0=open … 255=close |
 | `emergency_release(close_direction=False)`                | Latched release |
 | `read_state() -> GripperState`                            | Full status snapshot |
 | `is_at_target()` / `has_fault()`                          | Convenience predicates |
+| `read_fast_state() -> FastState`                          | Fast-poll block `0x02C0` (fw ≥ v1.15.0): status, position, current, fault + both tips' tactile (8-bit) in **one** read |
+| `read_tactile() -> (TactileTip, TactileTip)`              | Both fingertips' tactile resultant `(right, left)` from `0x0220~` (0.01 mm / 0.01 N) |
+| `read_tactile_raw(tip) -> TactileRaw`                     | One tip's raw 69-channel stream (bring-up); `tip` = `registers.TACT_TIP_RIGHT` / `TACT_TIP_LEFT` |
+| `tactile_zero(tips=TACT_TIP_BOTH)`                        | Sensor no-load zero (fw ≥ v1.17.0) — pads untouched; tip reads `WAITING` ~1.25 s, then `LIVE` |
+| `tactile_command(code, tips, arg=0)`                      | Any structured tactile command (`registers.TACT_SCMD_*`) |
+| `sensor_zero()`                                           | Firmware software tare (`DEV_CMD 0x08`) of Fx/Fy/Fz, RAM only |
 | `read_register(pdu_addr)` / `write_register(pdu_addr, value)` | Raw Modbus access |
 
 `Gripper` is a context manager — `with Gripper() as g:` auto-closes the port.
@@ -166,6 +178,68 @@ class GripperState:
     latched_fault: int            # gFLTO
 ```
 
+## Tactile sensor
+
+Needs firmware protocol ≥ v1.18.0 and `CFG_SENSOR_TYPE = 2` (tactile).
+Set it once with `python examples/08_tactile_sensor.py PORT --enable`
+(writes `0x018A`, `SAVE_CONFIG`), then power-cycle. Tip 1 = **right**
+finger, tip 2 = **left** finger.
+
+```python
+from aidin_gripper import Gripper, TactileLink
+
+with Gripper() as g:
+    g.connect("/dev/ttyUSB0")
+    right, left = g.read_tactile()          # one 16-register read
+    if right.link == TactileLink.LIVE:
+        print(right.pos_x, right.pos_y)      # contact point [mm]
+        print(right.fx, right.fy, right.fz)  # force [N], fz > 0 = pressing
+    g.tactile_zero()                         # pads untouched!
+```
+
+```python
+@dataclass
+class TactileTip:
+    valid, saturated, timeout, connected, raw_stream, contact, seen, raw_fresh: bool
+    pos_x:    float  # mm, 0..32 from the wrist-side edge of the cell area toward the fingertip; 0 = no contact point
+    pos_y:    float  # mm, +-12.5 across the pad width
+    fx, fy:   float  # N, shear along +pos_x / +pos_y (after tare)
+    fz:       float  # N, normal force, > 0 = pressing (after tare)
+    rate_hz:  int    # result frames in the last second (~100); read_tactile() only
+    rx_count: int    # result frames since boot (wraps); read_tactile() only
+    status:   int    # raw TACT_STATUS word
+    link             # property -> TactileLink
+    has_contact_point  # property: valid and pos_x > 0
+```
+
+`TactileLink`: `NOT_DETECTED` (never seen — not fitted / wiring / sensor
+type ≠ 2) · `DISCONNECTED` (frames stopped) · `RAW_STREAM` (sensor sends
+raw channels, not results) · `WAITING` (sensor zeroing: ~4.5 s after boot,
+~1.25 s after `tactile_zero()`) · `LIVE`.
+
+## Fast-poll block (`0x02C0`)
+
+`read_fast_state()` reads the 10-register block in **one** transaction
+(~4 ms at 115200 bps) and decodes it into:
+
+```python
+@dataclass
+class FastState:
+    activated, homed, go_to_active: bool
+    stage:        GripperStage
+    object_state: ObjectState
+    position:     int          # gPO
+    current:      int          # gCU
+    fault:        int          # gFLT
+    right:        TactileTip   # 8-bit: 0.2 mm / 0.2 N steps, rate_hz = rx_count = 0
+    left:         TactileTip
+```
+
+Use it when you need gripper state and tactile together at a high rate;
+use `read_state()` / `read_tactile()` when you need voltage, speed, the
+latched fault or 0.01-resolution tactile values. Register layout and
+decoding: [../README.md](../README.md#fast-poll-block--고속-폴링-블록-0x02c00x02c9).
+
 ## C++ vs Python API mapping
 
 | C++                             | Python                          |
@@ -176,6 +250,9 @@ class GripperState:
 | `g.moveTo(255, 200, 128, true)` | `g.move_to(255, 200, 128, blocking=True)` |
 | `g.readState()`                 | `g.read_state()`                |
 | `g.isAtTarget()`                | `g.is_at_target()`              |
+| `g.readFastState()`             | `g.read_fast_state()`           |
+| `auto tips = g.readTactile();` (`tips[0]` right) | `right, left = g.read_tactile()` |
+| `g.tactileZero()`               | `g.tactile_zero()`              |
 | `aidin::reg::ACTION`            | `aidin_gripper.registers.ACTION` |
 | `try { ... } catch (GripperError& e)` | `try: ... except GripperError as e:` |
 
@@ -196,6 +273,10 @@ firmware-side definitions in `aidin_modbus.h`. Full protocol details:
 | `read_holding_registers failed: ... timeout`     | Wrong baud / parity / slave ID; or RS485 A↔B swapped |
 | `activate timeout`                               | Power supply low, or latched fault — read `state.latched_fault` |
 | Gripper ignores `move_to` after one move         | `rATR` still latched after `emergency_release` — call `activate()` again |
+| Tactile tip stays `NOT_DETECTED`                 | `CFG_SENSOR_TYPE` ≠ 2 (run example 08 with `--enable`, power-cycle), or sensor cable |
+| Tactile tip stays `WAITING`                      | Sensor still zeroing (~4.5 s after power-up), or its data stream is broken |
+| `tactile command rejected`                       | Sensor type not tactile, values invalid, or force control is using the sensor as feedback |
+| `read_fast_state()` fails with illegal address   | Firmware older than protocol v1.15.0 — use `read_state()` / `read_tactile()` |
 
 ## License
 

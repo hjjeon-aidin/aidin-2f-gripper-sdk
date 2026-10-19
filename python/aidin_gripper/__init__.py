@@ -8,7 +8,16 @@
 ...     g.move_to(255, speed=200, blocking=True)
 """
 from .gripper import Gripper
-from .types import GripperError, GripperStage, GripperState, ObjectState
+from .types import (
+    FastState,
+    GripperError,
+    GripperStage,
+    GripperState,
+    ObjectState,
+    TactileLink,
+    TactileRaw,
+    TactileTip,
+)
 from . import registers
 
 __all__ = [
@@ -17,6 +26,10 @@ __all__ = [
     "GripperState",
     "GripperStage",
     "ObjectState",
+    "FastState",
+    "TactileLink",
+    "TactileRaw",
+    "TactileTip",
     "registers",
 ]
 

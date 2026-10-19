@@ -154,7 +154,7 @@ int main() try {
 | Parameter   | Default     | Notes |
 |-------------|-------------|-------|
 | `port`      | (required)  | `/dev/ttyUSB0`, `/dev/ttyACM0` (Linux); `COM3`, `COM10` (Windows — `\\.\COM10` prefix is auto-applied). |
-| `baudrate`  | `115200`    | Firmware default. Configurable via register `0x0183`/`0x0184`. Common values: 9600, 19200, 38400, 57600, 115200, 230400. |
+| `baudrate`  | `115200`    | Firmware default. Configurable via register `0x0183`/`0x0184` (firmware protocol ≥ v1.16.0). Supported: 9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600, 1000000 (≥ 460800 needs an adapter and RS485 line that can carry it; Linux 1000000 needs `B1000000`). |
 | `parity`    | `'N'`       | `'N'` none, `'E'` even, `'O'` odd. Firmware ships with `'N'`. |
 | `slaveId`   | `1`         | Firmware default. Configurable via register `0x0182` (range 1..247). |
 
@@ -163,13 +163,19 @@ Data bits and stop bits are fixed at 8 / 1 (`8N1`).
 ### Changing baud rate / slave ID
 
 ```cpp
-g.writeRegister(aidin::reg::CFG_MB_ADDR,    7);         // slave 7
-g.writeRegister(aidin::reg::CFG_MB_BAUD_LO, 230400 & 0xFFFF);
-g.writeRegister(aidin::reg::CFG_MB_BAUD_HI, 230400 >> 16);
-g.writeRegister(aidin::reg::DEV_CMD,        /* SAVE_CONFIG */);  // persist to flash
+g.writeRegister(aidin::reg::CFG_MB_ADDR,    7);                // slave 7
+g.writeRegister(aidin::reg::CFG_MB_BAUD_LO, 230400 & 0xFFFF);  // raw bps, LO word
+g.writeRegister(aidin::reg::CFG_MB_BAUD_HI, 230400 >> 16);     // raw bps, HI word
+g.writeRegister(aidin::reg::DEV_CMD, aidin::reg::DEV_CMD_SAVE_CONFIG);  // persist to flash
+// poll until DEV_STATUS leaves IDLE/RUNNING; expect DEV_STATUS_OK
 ```
-After the firmware saves and restarts the UART, the next `connect()` must
-use the new parameters.
+The new address/baud take effect at the **next boot** — power-cycle the
+gripper, then `connect()` with the new parameters. Until then the gripper keeps
+talking at the old settings. If the baud is not in the supported list,
+`SAVE_CONFIG` ends with `DEV_STATUS_ERROR`, nothing is saved, and
+`0x0183`/`0x0184` read back the previously configured value. Every device on
+one RS485 bus must use the same baud. Firmware older than protocol v1.16.0
+stores the value but always runs at 115200 — do not change the baud on it.
 
 ---
 
@@ -213,7 +219,7 @@ you must do the same.
 
 All classes live in namespace `aidin`. Headers:
 - [`include/aidin/gripper.hpp`](include/aidin/gripper.hpp) — main API.
-- [`include/aidin/types.hpp`](include/aidin/types.hpp) — `GripperState`, enums.
+- [`include/aidin/types.hpp`](include/aidin/types.hpp) — `GripperState`, `FastState`, `TactileTip`, `TactileRaw`, enums.
 - [`include/aidin/registers.hpp`](include/aidin/registers.hpp) — register/bit constants.
 
 ### 6.1 Class `Gripper`
@@ -246,6 +252,13 @@ class Gripper {
     GripperState readState();
     bool         isAtTarget();
     bool         hasFault();
+    FastState    readFastState();                 // 0x02C0 block, one read
+
+    TactilePair  readTactile();                   // {right, left}
+    TactileRaw   readTactileRaw(uint16_t tip);    // reg::TACT_TIP_RIGHT / _LEFT
+    void         tactileZero(uint16_t tips = reg::TACT_TIP_BOTH);
+    void         tactileCommand(uint16_t code, uint16_t tips, uint16_t arg = 0);
+    void         sensorZero();
 
     uint16_t readRegister(uint16_t pduAddr);
     void     writeRegister(uint16_t pduAddr, uint16_t value);
@@ -319,6 +332,44 @@ wire. Prefer this over multiple `readRegister()` calls.
 `readState()` — each costs one full transaction. If you call both,
 prefer `readState()` directly and check the struct fields.
 
+#### `readFastState()`
+
+One Modbus transaction (function `0x03`, 10 registers) at `0x02C0` — the
+fast-poll block (§7.6, firmware protocol ≥ v1.15.0). Returns `FastState`:
+`gSTA`/`gOBJ`/`gACT`/`gHOM`/`gGTO`, `gPO`, `gCU`, `gFLT` and both
+fingertips' tactile resultant in 8-bit resolution (0.2 mm / 0.2 N). The
+firmware rewrites the block atomically, so the result is one consistent
+snapshot. ≈ 4 ms per call at 115200 baud (measured max ≈ 248 Hz). Use it
+for high-rate loops; use `readState()` when you need `gSP`, `gV`,
+`gFLTO` or `gPR`, and `readTactile()` for 0.01 resolution.
+
+#### `readTactile()` / `readTactileRaw(tip)`
+
+`readTactile()` reads 16 registers at `0x0220` (§7.5) in one transaction
+and returns `TactilePair` = `{right (tip 1), left (tip 2)}`: contact
+point [mm], Fx/Fy/Fz [N], frame rate, and the link state via
+`TactileTip::link()`. Requires `CFG_SENSOR_TYPE = 2`; with another
+sensor type both tips read `TactileLink::NotDetected` and zero values.
+
+`readTactileRaw(tip)` reads one tip's raw 69-channel diagnostic block (71
+registers) — bring-up only, meaningful while that tip's `rawFresh` is set.
+
+#### `tactileZero(tips)` / `tactileCommand(code, tips, arg)` / `sensorZero()`
+
+`tactileZero()` sends the sensor no-load zero (structured command `ZERO`,
+firmware ≥ v1.17.0) to the tips in the bitmask (`reg::TACT_TIP_RIGHT`,
+`TACT_TIP_LEFT`, default both): it writes `0x01BB~0x01BD` with one FC16,
+then `DEV_CMD = 0x0F`, and returns once `DEV_STATUS = OK` (frame sent).
+**Keep the pads untouched.** The tip then reads `Waiting` for ≈ 1.25 s and
+returns to `Live` with the new zero. Throws if the firmware rejects it —
+sensor type not tactile, invalid values, or force control running with
+the sensor as feedback. `tactileCommand()` is the generic form
+(`reg::TACT_SCMD_*`).
+
+`sensorZero()` is the firmware's software tare (`DEV_CMD 0x08`): the
+current Fx/Fy/Fz of every valid tip becomes zero (F/T or tactile). RAM
+only — cleared on reboot.
+
 #### `readRegister()` / `writeRegister()`
 
 Raw Modbus access for configuration registers (`0x0180..0x0189`) and
@@ -347,6 +398,51 @@ struct GripperState {
 
 `operator<<(std::ostream&, const GripperState&)` produces a one-line
 debug dump.
+
+### 6.3 Tactile and fast-poll types
+
+```cpp
+enum class TactileLink : uint8_t {
+    NotDetected, Disconnected, RawStream, Waiting, Live
+};
+
+struct TactileTip {                 // one fingertip, gripper frame (fw >= v1.18.0)
+    bool     valid, saturated, timeout, connected,
+             rawStream, contact, seen, rawFresh;   // TACT_STATUS bits
+    float    posX;     // mm, 0..32 from the wrist-side edge of the cell area toward the fingertip; 0 = no contact point
+    float    posY;     // mm, +-12.5 across the pad width
+    float    fx, fy;   // N, shear along +posX / +posY (after tare)
+    float    fz;       // N, normal force, > 0 = pressing (after tare)
+    uint16_t rateHz;   // result frames in the last second (~100); readTactile() only
+    uint16_t rxCount;  // result frames since boot (wraps); readTactile() only
+    uint16_t status;   // raw TACT_STATUS word
+    TactileLink link() const;
+    bool        hasContactPoint() const;   // valid && posX > 0
+};
+using TactilePair = std::array<TactileTip, 2>;   // [0] right (tip 1), [1] left (tip 2)
+
+struct TactileRaw {                 // raw diagnostic stream of one tip
+    uint16_t sets, diag;
+    std::array<int16_t, 69> channels;   // C0..C68
+    std::array<int32_t, 23> groups;     // G1..G23 = sum of 3 channels
+};
+
+struct FastState {                  // 0x02C0..0x02C9 snapshot
+    bool         activated, homed, goToActive;
+    GripperStage stage;
+    ObjectState  object;
+    uint8_t      position, current, fault;      // gPO, gCU, gFLT
+    TactileTip   right, left;                   // 8-bit: 0.2 mm / 0.2 N; rateHz = rxCount = 0
+};
+```
+
+`TactileLink` maps the status bits to what to show a user:
+`NotDetected` (never seen since boot — not fitted, wiring, or sensor type
+≠ 2) · `Disconnected` (was seen, frames stopped) · `RawStream` (sensor
+firmware sends raw channels instead of results) · `Waiting` (results
+arrive but are invalid — sensor zeroing, ≈ 4.5 s after power-up or
+≈ 1.25 s after `tactileZero()`) · `Live`. `toString(TactileLink)` and
+`operator<<` for `TactileTip` / `FastState` are provided.
 
 ---
 
@@ -414,6 +510,52 @@ constants — these are factory-tool territory and exposed only through
 | `0x0194` | Speed I    (int16) |
 | `0x0195` | Current P  (int16) |
 | `0x0196` | Current I  (int16) |
+
+### 7.5 Tactile sensor registers
+
+Active when `CFG_SENSOR_TYPE` (`0x018A`) = 2 — write it, `DEV_CMD 0x02
+SAVE_CONFIG`, power-cycle. Firmware protocol ≥ v1.13.0; the gripper-frame
+coordinates below need ≥ v1.18.0. Tip 1 = right finger, tip 2 = left.
+
+| Tip 1 | Tip 2 | Field | Description |
+|-------|-------|-------|-------------|
+| `0x0220` | `0x0228` | `TACT_STATUS` | b8 valid · b9 saturated · b10 timeout · b11 connected · b12 raw_stream · b13 contact (Fz ≥ 0.5 N) · b14 seen · b15 raw_fresh; low byte = 2 |
+| `0x0221` | `0x0229` | `POSX` | int16 [mm × 100], 0..3200 from the wrist-side edge of the cell area toward the fingertip; 0 = no contact point |
+| `0x0222` | `0x022A` | `POSY` | int16 [mm × 100], ±1250 across the pad width |
+| `0x0223` | `0x022B` | `FX` | int16 [N × 100] shear along +X, after tare |
+| `0x0224` | `0x022C` | `FY` | int16 [N × 100] shear along +Y, after tare |
+| `0x0225` | `0x022D` | `FZ` | int16 [N × 100] normal, positive = pressing, after tare |
+| `0x0226` | `0x022E` | `RATE` | result frames in the last second [Hz] (≈ 100) |
+| `0x0227` | `0x022F` | `RXCNT` | result frames since boot (wraps) |
+
+Values are 0 while `valid` = 0. Related registers:
+
+| PDU addr | Field | Description |
+|----------|-------|-------------|
+| `0x0230~0x0276` / `0x0277~0x02BD` | `TACTx_RAW` | raw 69-channel stream per tip: `[sets][diag][C0..C68]` |
+| `0x01B0~0x01BA` | `TACT_CMD_*` | CAN passthrough: tip, len (1..8), data[8], CAN ID (0 = default `0x324`) → `DEV_CMD 0x09` |
+| `0x01BB~0x01BD` | `TACT_SCMD_*` | structured command: code (`0x01` ZERO, `0x05` FACTORY_RESET with arg `0xA5A5`), tip bitmask, arg → `DEV_CMD 0x0F` |
+
+### 7.6 Fast-poll block (`0x02C0..0x02C9`)
+
+Read-only copy of the essentials for **one** FC03 read (protocol ≥ v1.15.0).
+The firmware rewrites all 10 words at once, so a reply never mixes update
+cycles.
+
+| PDU addr | High byte | Low byte |
+|----------|-----------|----------|
+| `0x02C0` | 0 | `STATUS` (same bits as `0x0200`) |
+| `0x02C1` | 0 | `gPO` |
+| `0x02C2` | 0 | `gCU` |
+| `0x02C3` / `0x02C6` | right / left `Px8` (uint8) | `Py8` (int8) |
+| `0x02C4` / `0x02C7` | `Fx8` (int8) | `Fy8` (int8) |
+| `0x02C5` / `0x02C8` | `Fz8` (uint8) | `status8` = `TACT_STATUS >> 8` |
+| `0x02C9` | 0 | `gFLT` |
+
+8-bit tactile values: 1 LSB = 0.2 mm / 0.2 N (draft scale — may change);
+out-of-range values clamp and set `saturated`. `Px8` is uint8 since
+v1.18.0 (int8 before). With `CFG_SENSOR_TYPE` ≠ 2 the six tactile words
+are 0.
 
 ---
 
@@ -489,6 +631,23 @@ A clean `disconnect()` runs via the `Gripper` destructor.
 Continuous polling at 100 ms intervals. Prints only when something
 changes — useful as a live readout during commissioning.
 
+### 10.4 `04_tactile_monitor.cpp`
+
+Checks `CFG_SENSOR_TYPE`, waits until both tips are `Live` (or absent),
+optionally zeroes them (`--zero`), then streams both tips at 20 Hz:
+```cpp
+const auto tips = g.readTactile();          // {right, left}
+if (tips[0].link() == aidin::TactileLink::Live) {
+    std::cout << tips[0].posX << " mm, Fz=" << tips[0].fz << " N\n";
+}
+g.tactileZero();                            // pads untouched
+```
+
+### 10.5 `05_fast_poll.cpp`
+
+Calls `readFastState()` back-to-back and prints the achieved rate twice a
+second — a quick way to see what the bus allows at your baud rate.
+
 ---
 
 ## 11. Troubleshooting
@@ -504,6 +663,10 @@ changes — useful as a live readout during commissioning.
 | Gripper moves once then ignores commands               | `rATR` latched after an `emergencyRelease()`                       | Call `activate()` again to clear the latch |
 | `moveTo` reports `AtTarget` instantly                  | Previous target was the same value                                 | Vary `position` by ≥1, or read state once before moving |
 | Examples build but link fails with `ws2_32`            | Windows-only — link `ws2_32`                                       | The wrapper handles this; check you used the vendored `CMakeLists.txt` |
+| Tactile tip stays `NotDetected`                        | `CFG_SENSOR_TYPE` ≠ 2, or sensor cable                             | Write `0x018A = 2`, `DEV_CMD 0x02`, power-cycle |
+| Tactile tip stays `Waiting`                            | Sensor still zeroing after power-up (≈ 4.5 s) or data stream broken | Wait; if it persists, check the sensor |
+| `tactile command rejected`                             | Not tactile, invalid values, or force control uses the sensor      | Stop force control (`FC_MODE = 0`) before zeroing |
+| `readFastState()` → `modbus exception code 2`          | Firmware older than protocol v1.15.0                               | Use `readState()` + `readTactile()` |
 
 ### Capturing a wire trace
 

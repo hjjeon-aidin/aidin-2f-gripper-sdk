@@ -12,6 +12,8 @@ find_package(rosidl_default_generators REQUIRED)
 
 set(msg_files
     msg/GripperState.msg
+    msg/TactileTip.msg
+    msg/TactileState.msg
 )
 
 set(srv_files

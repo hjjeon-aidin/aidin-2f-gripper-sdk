@@ -19,6 +19,10 @@ def generate_launch_description():
             "port",
             default_value="/dev/ttyUSB0",
             description="Serial port (overrides config if set)."),
+        DeclareLaunchArgument(
+            "publish_tactile",
+            default_value="false",
+            description="Publish ~/tactile from the fingertip tactile sensors (overrides config)."),
         Node(
             package="aidin_gripper_driver",
             executable="gripper_node",
@@ -27,6 +31,7 @@ def generate_launch_description():
             parameters=[
                 LaunchConfiguration("config"),
                 {"port": LaunchConfiguration("port")},
+                {"publish_tactile": LaunchConfiguration("publish_tactile")},
             ],
         ),
     ])

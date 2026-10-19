@@ -195,6 +195,9 @@ speed_t toSpeed(int baud) {
 #ifdef B921600
         case 921600: return B921600;
 #endif
+#ifdef B1000000
+        case 1000000: return B1000000;
+#endif
         default:     return 0;
     }
 }

@@ -54,6 +54,18 @@ public:
     void stop();
     // Trigger homing (rising edge of rHOM) and block until gHOM=1.
     void home(std::chrono::milliseconds timeout = std::chrono::seconds(15));
+    // Full initialization (protocol v1.12.0, DH-compatible ACTION=0xA5):
+    // activate + stroke calibration — open homing, close-contact stroke
+    // measurement, flash-persisted (readable at reg::CFG_STROKE). Works from
+    // the inactive state. Blocks until DEV_STATUS=OK and gHOM=1; throws on
+    // rejection (already homing/calibrating), fault, or timeout.
+    // Fingers sweep the FULL stroke twice — keep the workspace clear.
+    void fullInit(std::chrono::milliseconds timeout = std::chrono::seconds(30));
+    // Set trajectory generator limits (protocol v1.11.0, RAM only — reboot
+    // restores firmware defaults 100/400). rSP scales against these.
+    //   maxVel [rad/s] 1..150, maxAcc [rad/s^2] 1..800
+    // Throws if firmware rejects (out of range, or homing/calibrating).
+    void setTrajLimits(uint16_t maxVel, uint16_t maxAcc);
     // Move to absolute position. 0=fully open, 255=fully closed.
     //   speed:  0..255   force/current limit: 0..255
     //   blocking=true waits until gOBJ != Moving (target reached or object hit).
@@ -70,6 +82,33 @@ public:
     GripperState readState();
     bool         isAtTarget();
     bool         hasFault();
+    // Fast-poll block (0x02C0..0x02C9) in ONE transaction: status, position,
+    // current, fault + both fingertips' tactile resultant, refreshed atomically
+    // by the firmware (~4 ms at 115200 bps). Tactile values are 8-bit compressed
+    // (0.2 mm / 0.2 N). Firmware protocol >= v1.15.0; posX assumes >= v1.18.0.
+    FastState    readFastState();
+
+    // ---------- Tactile sensor ----------
+    // Needs CFG_SENSOR_TYPE = reg::SENSOR_TACTILE (write, SAVE_CONFIG, power cycle).
+    // Both fingertips' contact resultant (0x0220..0x022F, one transaction):
+    // {right (tip 1), left (tip 2)} — contact point [mm], Fx/Fy/Fz [N], 0.01
+    // resolution, link state. With another sensor type both read NotDetected.
+    TactilePair  readTactile();
+    // Raw 69-channel diagnostic stream of one tip (bring-up only).
+    // tip = reg::TACT_TIP_RIGHT or reg::TACT_TIP_LEFT. The block keeps its last
+    // values when the stream stops — trust it only while that tip's rawFresh.
+    TactileRaw   readTactileRaw(uint16_t tip);
+    // Sensor no-load zero (structured command ZERO, firmware >= v1.17.0).
+    // Keep the pads untouched. After OK the tip reads Waiting ~1.25 s, then Live;
+    // a tip whose zero CAN ID is unknown falls back to the firmware software tare.
+    // Throws if rejected (not tactile, values invalid, sensor-feedback force control).
+    void         tactileZero(uint16_t tips = 0x03 /* reg::TACT_TIP_BOTH */);
+    // Structured tactile command (reg::TACT_SCMD_*); tips = reg::TACT_TIP_* bitmask.
+    // Returns once the firmware reports OK (CAN frame sent; the sensor does not ack).
+    void         tactileCommand(uint16_t code, uint16_t tips, uint16_t arg = 0);
+    // Firmware software tare (DEV_CMD 0x08): current Fx/Fy/Fz of every valid tip
+    // becomes zero (AFT F/T or tactile). RAM only — cleared on reboot.
+    void         sensorZero();
 
     // ---------- Low-level escape hatch ----------
     // Direct Modbus register access. pduAddr is the protocol-level address

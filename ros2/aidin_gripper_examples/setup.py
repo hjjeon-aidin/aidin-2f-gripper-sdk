@@ -20,6 +20,7 @@ setup(
     entry_points={
         "console_scripts": [
             "state_listener  = aidin_gripper_examples.state_listener:main",
+            "tactile_listener = aidin_gripper_examples.tactile_listener:main",
             "open_close_loop = aidin_gripper_examples.open_close_loop:main",
             "interactive_cli = aidin_gripper_examples.interactive_cli:main",
         ],

@@ -10,3 +10,7 @@ aidin_gripper_driver:
     publish_rate_hz: 50.0
     auto_activate: true       # set rACT=1 at startup
     auto_home: false          # call home() at startup (set true on systems where boot-time homing is safe)
+
+    # Fingertip tactile sensors (needs CFG_SENSOR_TYPE = 2, firmware protocol >= v1.18.0)
+    publish_tactile: false    # also read 0x0220~ each cycle and publish ~/tactile (TactileState);
+                              # the launch file's publish_tactile:= argument overrides this

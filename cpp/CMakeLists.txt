@@ -37,7 +37,9 @@ if(AIDIN_BUILD_EXAMPLES)
     foreach(ex
         01_activate_and_home
         02_open_close_loop
-        03_status_monitor)
+        03_status_monitor
+        04_tactile_monitor
+        05_fast_poll)
         add_executable(${ex} examples/${ex}.cpp)
         target_link_libraries(${ex} PRIVATE aidin_gripper)
     endforeach()

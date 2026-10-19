@@ -6,11 +6,14 @@
 //   * /aidin_gripper/activate          (std_srvs/srv/Trigger)
 //   * /aidin_gripper/deactivate        (std_srvs/srv/Trigger)
 //   * /aidin_gripper/home              (std_srvs/srv/Trigger)
+//   * /aidin_gripper/full_init         (std_srvs/srv/Trigger)
 //   * /aidin_gripper/stop              (std_srvs/srv/Trigger)
 //   * /aidin_gripper/fault_clear       (std_srvs/srv/Trigger)
 //   * /aidin_gripper/move_to           (aidin_gripper_msgs/srv/MoveTo)
 //   * /aidin_gripper/emergency_release (aidin_gripper_msgs/srv/EmergencyRelease)
 //   * /aidin_gripper/dev_cmd           (aidin_gripper_msgs/srv/DevCmd) — see below
+//   * /aidin_gripper/tactile           (aidin_gripper_msgs/msg/TactileState) — publish_tactile:=true
+//   * /aidin_gripper/tactile_zero      (std_srvs/srv/Trigger)
 #include "aidin/gripper.hpp"
 #include "aidin/registers.hpp"
 
@@ -18,6 +21,7 @@
 #include <std_srvs/srv/trigger.hpp>
 
 #include "aidin_gripper_msgs/msg/gripper_state.hpp"
+#include "aidin_gripper_msgs/msg/tactile_state.hpp"
 #include "aidin_gripper_msgs/srv/dev_cmd.hpp"
 #include "aidin_gripper_msgs/srv/move_to.hpp"
 #include "aidin_gripper_msgs/srv/emergency_release.hpp"
@@ -38,6 +42,8 @@
 
 using namespace std::chrono_literals;
 using GripperStateMsg     = aidin_gripper_msgs::msg::GripperState;
+using TactileStateMsg     = aidin_gripper_msgs::msg::TactileState;
+using TactileTipMsg       = aidin_gripper_msgs::msg::TactileTip;
 using DevCmdSrv           = aidin_gripper_msgs::srv::DevCmd;
 using MoveToSrv           = aidin_gripper_msgs::srv::MoveTo;
 using EmergencyReleaseSrv = aidin_gripper_msgs::srv::EmergencyRelease;
@@ -54,6 +60,7 @@ public:
         publish_rate_ = declare_parameter<double>("publish_rate_hz", 50.0);
         auto_activate_ = declare_parameter<bool>("auto_activate", true);
         auto_home_    = declare_parameter<bool>("auto_home", false);
+        publish_tactile_ = declare_parameter<bool>("publish_tactile", false);
 
         // ----- Connect to the gripper -----
         try {
@@ -89,6 +96,20 @@ public:
         // ----- ROS interfaces -----
         state_pub_ = create_publisher<GripperStateMsg>(
             "~/state", rclcpp::SensorDataQoS());
+        if (publish_tactile_) {
+            tactile_pub_ = create_publisher<TactileStateMsg>(
+                "~/tactile", rclcpp::SensorDataQoS());
+            try {
+                const uint16_t sensor = gripper_.readRegister(aidin::reg::CFG_SENSOR_TYPE);
+                if (sensor != aidin::reg::SENSOR_TACTILE) {
+                    RCLCPP_WARN(get_logger(),
+                        "publish_tactile is set but CFG_SENSOR_TYPE=%u (tactile is 2) — "
+                        "~/tactile will report LINK_NOT_DETECTED", static_cast<unsigned>(sensor));
+                }
+            } catch (const std::exception& e) {
+                RCLCPP_WARN(get_logger(), "CFG_SENSOR_TYPE read failed: %s", e.what());
+            }
+        }
 
         srv_activate_   = create_service<TriggerSrv>("~/activate",
             std::bind(&AidinGripperNode::onActivate, this,
@@ -98,6 +119,9 @@ public:
                       std::placeholders::_1, std::placeholders::_2));
         srv_home_       = create_service<TriggerSrv>("~/home",
             std::bind(&AidinGripperNode::onHome, this,
+                      std::placeholders::_1, std::placeholders::_2));
+        srv_full_init_  = create_service<TriggerSrv>("~/full_init",
+            std::bind(&AidinGripperNode::onFullInit, this,
                       std::placeholders::_1, std::placeholders::_2));
         srv_stop_       = create_service<TriggerSrv>("~/stop",
             std::bind(&AidinGripperNode::onStop, this,
@@ -110,6 +134,9 @@ public:
                       std::placeholders::_1, std::placeholders::_2));
         srv_release_    = create_service<EmergencyReleaseSrv>("~/emergency_release",
             std::bind(&AidinGripperNode::onEmergencyRelease, this,
+                      std::placeholders::_1, std::placeholders::_2));
+        srv_tactile_zero_ = create_service<TriggerSrv>("~/tactile_zero",
+            std::bind(&AidinGripperNode::onTactileZero, this,
                       std::placeholders::_1, std::placeholders::_2));
 #if AIDIN_ENABLE_DEV_CMD
         srv_dev_cmd_    = create_service<DevCmdSrv>("~/dev_cmd",
@@ -159,6 +186,44 @@ private:
         msg.speed           = s.speed;
         msg.voltage         = s.voltage;
         state_pub_->publish(msg);
+
+        if (tactile_pub_) publishTactile();
+    }
+
+    void publishTactile() {
+        aidin::TactilePair tips;
+        {
+            std::lock_guard<std::mutex> lk(io_mutex_);
+            try {
+                tips = gripper_.readTactile();
+            } catch (const std::exception& e) {
+                RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
+                    "readTactile failed: %s", e.what());
+                return;
+            }
+        }
+        TactileStateMsg msg;
+        msg.header.stamp    = now();
+        msg.header.frame_id = "aidin_gripper";
+        msg.right           = toMsg(tips[0]);
+        msg.left            = toMsg(tips[1]);
+        tactile_pub_->publish(msg);
+    }
+
+    static TactileTipMsg toMsg(const aidin::TactileTip& t) {
+        TactileTipMsg m;
+        m.link      = static_cast<uint8_t>(t.link());
+        m.valid     = t.valid;
+        m.contact   = t.contact;
+        m.saturated = t.saturated;
+        m.pos_x     = t.posX;
+        m.pos_y     = t.posY;
+        m.fx        = t.fx;
+        m.fy        = t.fy;
+        m.fz        = t.fz;
+        m.rate_hz   = t.rateHz;
+        m.status    = t.status;
+        return m;
     }
 
     // ---------------- Service helpers ----------------
@@ -188,9 +253,21 @@ private:
                 std::shared_ptr<TriggerSrv::Response> resp) {
         runCommand(*req, *resp, "home", [&]{ gripper_.home(); });
     }
+    void onFullInit(const std::shared_ptr<TriggerSrv::Request> req,
+                    std::shared_ptr<TriggerSrv::Response> resp) {
+        // Full initialization (protocol v1.12.0, ACTION=0xA5): activate +
+        // stroke calibration. Fingers sweep the full stroke twice.
+        runCommand(*req, *resp, "full_init", [&]{ gripper_.fullInit(); });
+    }
     void onStop(const std::shared_ptr<TriggerSrv::Request> req,
                 std::shared_ptr<TriggerSrv::Response> resp) {
         runCommand(*req, *resp, "stop", [&]{ gripper_.stop(); });
+    }
+    void onTactileZero(const std::shared_ptr<TriggerSrv::Request> req,
+                       std::shared_ptr<TriggerSrv::Response> resp) {
+        // Sensor no-load zero on both tips (protocol v1.17.0+). Pads must be
+        // untouched; each tip reads LINK_WAITING ~1.25 s, then LINK_LIVE.
+        runCommand(*req, *resp, "tactile_zero", [&]{ gripper_.tactileZero(); });
     }
 
     void onFaultClear(const std::shared_ptr<TriggerSrv::Request> req,
@@ -277,16 +354,19 @@ private:
     std::string port_, parity_;
     int         baudrate_{}, slave_id_{};
     double      publish_rate_{};
-    bool        auto_activate_{}, auto_home_{};
+    bool        auto_activate_{}, auto_home_{}, publish_tactile_{};
 
     rclcpp::Publisher<GripperStateMsg>::SharedPtr      state_pub_;
+    rclcpp::Publisher<TactileStateMsg>::SharedPtr      tactile_pub_;
     rclcpp::Service<TriggerSrv>::SharedPtr             srv_activate_;
     rclcpp::Service<TriggerSrv>::SharedPtr             srv_deactivate_;
     rclcpp::Service<TriggerSrv>::SharedPtr             srv_home_;
+    rclcpp::Service<TriggerSrv>::SharedPtr             srv_full_init_;
     rclcpp::Service<TriggerSrv>::SharedPtr             srv_stop_;
     rclcpp::Service<TriggerSrv>::SharedPtr             srv_fault_clear_;
     rclcpp::Service<MoveToSrv>::SharedPtr              srv_move_;
     rclcpp::Service<EmergencyReleaseSrv>::SharedPtr    srv_release_;
+    rclcpp::Service<TriggerSrv>::SharedPtr             srv_tactile_zero_;
 #if AIDIN_ENABLE_DEV_CMD
     rclcpp::Service<DevCmdSrv>::SharedPtr              srv_dev_cmd_;
 #endif
