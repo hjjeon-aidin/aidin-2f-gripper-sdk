@@ -85,7 +85,8 @@ public:
     // Fast-poll block (0x02C0..0x02C9) in ONE transaction: status, position,
     // current, fault + both fingertips' tactile resultant, refreshed atomically
     // by the firmware (~4 ms at 115200 bps). Tactile values are 8-bit compressed
-    // (0.2 mm / 0.2 N). Firmware protocol >= v1.15.0; posX assumes >= v1.18.0.
+    // over each field's full scale (Px 32 mm, Py +-12.5 mm, Fx/Fy +-35 N, Fz 70 N).
+    // Firmware protocol >= v1.15.0; the scales decode correctly only with >= v1.19.0.
     FastState    readFastState();
 
     // ---------- Tactile sensor ----------

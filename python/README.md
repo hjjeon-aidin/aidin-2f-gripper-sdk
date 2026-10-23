@@ -231,7 +231,7 @@ class FastState:
     position:     int          # gPO
     current:      int          # gCU
     fault:        int          # gFLT
-    right:        TactileTip   # 8-bit: 0.2 mm / 0.2 N steps, rate_hz = rx_count = 0
+    right:        TactileTip   # 8-bit: ~0.1 mm / ~0.27 N steps, rate_hz = rx_count = 0
     left:         TactileTip
 ```
 

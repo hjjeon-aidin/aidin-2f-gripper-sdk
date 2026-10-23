@@ -110,7 +110,8 @@ class FastState:
     """One snapshot of the fast-poll block 0x02C0..0x02C9 (single FC03 read).
 
     Gripper fields are copies of 0x0200/0x0201/0x0203/0x0204. Tactile values
-    are 8-bit compressed (0.2 mm / 0.2 N per LSB) - use read_tactile() when
+    are 8-bit compressed over each field's full scale (Px 32 mm, Py +-12.5 mm,
+    Fx/Fy +-35 N, Fz 70 N; protocol >= v1.19.0) - use read_tactile() when
     you need 0.01 resolution, rate_hz or rx_count.
     """
     activated:    bool         = False

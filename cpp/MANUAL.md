@@ -337,7 +337,8 @@ prefer `readState()` directly and check the struct fields.
 One Modbus transaction (function `0x03`, 10 registers) at `0x02C0` — the
 fast-poll block (§7.6, firmware protocol ≥ v1.15.0). Returns `FastState`:
 `gSTA`/`gOBJ`/`gACT`/`gHOM`/`gGTO`, `gPO`, `gCU`, `gFLT` and both
-fingertips' tactile resultant in 8-bit resolution (0.2 mm / 0.2 N). The
+fingertips' tactile resultant in 8-bit resolution (full scale per field:
+Px 32 mm, Py ±12.5 mm, Fx/Fy ±35 N, Fz 70 N). The
 firmware rewrites the block atomically, so the result is one consistent
 snapshot. ≈ 4 ms per call at 115200 baud (measured max ≈ 248 Hz). Use it
 for high-rate loops; use `readState()` when you need `gSP`, `gV`,
@@ -432,7 +433,7 @@ struct FastState {                  // 0x02C0..0x02C9 snapshot
     GripperStage stage;
     ObjectState  object;
     uint8_t      position, current, fault;      // gPO, gCU, gFLT
-    TactileTip   right, left;                   // 8-bit: 0.2 mm / 0.2 N; rateHz = rxCount = 0
+    TactileTip   right, left;                   // 8-bit: ~0.1 mm / ~0.27 N; rateHz = rxCount = 0
 };
 ```
 
@@ -552,7 +553,9 @@ cycles.
 | `0x02C5` / `0x02C8` | `Fz8` (uint8) | `status8` = `TACT_STATUS >> 8` |
 | `0x02C9` | 0 | `gFLT` |
 
-8-bit tactile values: 1 LSB = 0.2 mm / 0.2 N (draft scale — may change);
+8-bit tactile values: each field's full scale maps to the end of its byte
+range — `Px8` 0..255 ↔ 0..32 mm, `Py8` ±127 ↔ ±12.5 mm, `Fx8`/`Fy8` ±127 ↔
+±35 N (provisional), `Fz8` 0..255 ↔ 0..70 N (protocol ≥ v1.19.0);
 out-of-range values clamp and set `saturated`. `Px8` is uint8 since
 v1.18.0 (int8 before). With `CFG_SENSOR_TYPE` ≠ 2 the six tactile words
 are 0. Packing rules, a decoded wire example, PLC addressing and polling

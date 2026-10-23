@@ -55,11 +55,11 @@ TactileTip fastTip(const uint16_t* w) {
     TactileTip t = tactileFlags(static_cast<uint16_t>((w[2] & 0xFF) << 8));  // status8 = TACT_STATUS[15:8]
     const auto s8 = [](uint16_t b) { return static_cast<float>(static_cast<int8_t>(b & 0xFF)); };
     const auto u8 = [](uint16_t b) { return static_cast<float>(b & 0xFF); };
-    t.posX = u8(w[0] >> 8) * reg::FAST_TACT_LSB;
-    t.posY = s8(w[0])      * reg::FAST_TACT_LSB;
-    t.fx   = s8(w[1] >> 8) * reg::FAST_TACT_LSB;
-    t.fy   = s8(w[1])      * reg::FAST_TACT_LSB;
-    t.fz   = u8(w[2] >> 8) * reg::FAST_TACT_LSB;
+    t.posX = u8(w[0] >> 8) * reg::FAST_PX_MAX  / 255.0f;
+    t.posY = s8(w[0])      * reg::FAST_PY_MAX  / 127.0f;
+    t.fx   = s8(w[1] >> 8) * reg::FAST_FXY_MAX / 127.0f;
+    t.fy   = s8(w[1])      * reg::FAST_FXY_MAX / 127.0f;
+    t.fz   = u8(w[2] >> 8) * reg::FAST_FZ_MAX  / 255.0f;
     return t;
 }
 

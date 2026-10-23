@@ -129,7 +129,7 @@ already exist here.
   sequences, Modbus frame examples — is in the **AIDIN Gripper Modbus RTU
   Protocol Manual** (`aidin_modbus_rtu_manual.pdf` / `.html`, Manual Rev 2.3,
   in the firmware repo `aidin-bldc-firmware/docs/`). The canonical register
-  contract is `docs/protocol/protocol.md` in the same repo (spec v1.18.0).
+  contract is `docs/protocol/protocol.md` in the same repo (spec v1.19.0).
   Neither is included here — the registers mirrored in
   [`cpp/include/aidin/registers.hpp`](cpp/include/aidin/registers.hpp) /
   [`python/aidin_gripper/registers.py`](python/aidin_gripper/registers.py)
@@ -369,7 +369,8 @@ cover the 32 mm toward the fingertip.
 
 ### Fast-poll block / 고속 폴링 블록 (`0x02C0~0x02C9`)
 
-Firmware protocol ≥ v1.15.0. A **read-only copy** of the essentials —
+Firmware protocol ≥ v1.15.0 (the 8-bit tactile scale below: ≥ v1.19.0).
+A **read-only copy** of the essentials —
 gripper status, position, current, fault and both fingertips' tactile
 resultant — packed so **one FC03 read of 10 registers** returns them all.
 The firmware rewrites the 10 words in one go, so every reply is a single
@@ -396,16 +397,16 @@ the original addresses (`0x0200~`, `0x0220~`) stay valid.
 R = right finger (tip 1), L = left finger (tip 2). PLC "4x" addresses:
 40705..40714.
 
-| Field | Register [bits] | Type | LSB | Range | Copy of | Meaning |
+| Field | Register [bits] | Type | Resolution | Range | Copy of | Meaning |
 |---|---|---|---|---|---|---|
 | `STATUS` | `0x02C0` [7:0] | bits | — | — | `0x0200` | `gACT` · `gHOM` · `gGTO` · `gSTA` · `gOBJ`, same bits as [`0x0200`](#status-bits-read-0x0200) |
 | `gPO` | `0x02C1` [7:0] | uint8 | — | 0..255 | `0x0203` | actual position, 0 = open, 255 = closed |
 | `gCU` | `0x02C2` [7:0] | uint8 | — | 0..255 | `0x0204` | actual motor current (normalized) |
-| `Px` | `0x02C3` / `0x02C6` [15:8] | uint8 | 0.2 mm | 0 .. 51.0 mm | `POSX` `0x0221` / `0x0229` | contact point X, from the wrist-side edge of the cell area toward the fingertip; **0 = no contact point** |
-| `Py` | `0x02C3` / `0x02C6` [7:0] | int8 | 0.2 mm | −25.6 .. +25.4 mm | `POSY` `0x0222` / `0x022A` | contact point Y across the pad width (centre = 0) |
-| `Fx` | `0x02C4` / `0x02C7` [15:8] | int8 | 0.2 N | −25.6 .. +25.4 N | `FX` `0x0223` / `0x022B` | shear force along +X, after tare |
-| `Fy` | `0x02C4` / `0x02C7` [7:0] | int8 | 0.2 N | −25.6 .. +25.4 N | `FY` `0x0224` / `0x022C` | shear force along +Y, after tare |
-| `Fz` | `0x02C5` / `0x02C8` [15:8] | uint8 | 0.2 N | 0 .. 51.0 N | `FZ` `0x0225` / `0x022D` | normal force, positive = pressing, after tare |
+| `Px` | `0x02C3` / `0x02C6` [15:8] | uint8 | 32/255 ≈ 0.1255 mm | 0 .. 32.0 mm | `POSX` `0x0221` / `0x0229` | contact point X, from the wrist-side edge of the cell area toward the fingertip; **0 = no contact point** |
+| `Py` | `0x02C3` / `0x02C6` [7:0] | int8 | 12.5/127 ≈ 0.0984 mm | −12.5 .. +12.5 mm | `POSY` `0x0222` / `0x022A` | contact point Y across the pad width (centre = 0) |
+| `Fx` | `0x02C4` / `0x02C7` [15:8] | int8 | 35/127 ≈ 0.2756 N | −35 .. +35 N ⚠ | `FX` `0x0223` / `0x022B` | shear force along +X, after tare |
+| `Fy` | `0x02C4` / `0x02C7` [7:0] | int8 | 35/127 ≈ 0.2756 N | −35 .. +35 N ⚠ | `FY` `0x0224` / `0x022C` | shear force along +Y, after tare |
+| `Fz` | `0x02C5` / `0x02C8` [15:8] | uint8 | 70/255 ≈ 0.2745 N | 0 .. 70 N | `FZ` `0x0225` / `0x022D` | normal force, positive = pressing, after tare |
 | `status8` | `0x02C5` / `0x02C8` [7:0] | — | — | — | — | tactile status — **(개발중, 구현 예정)**, see [below](#tactile-status-status8--개발중-구현-예정) |
 | `gFLT` | `0x02C9` [7:0] | uint8 | — | 0..11 | `0x0201` | current fault code ([fault codes](#fault-codes--폴트-코드-gflt--gflto)); the latched `gFLTO` is not in the block |
 
@@ -414,61 +415,87 @@ R = right finger (tip 1), L = left finger (tip 2). PLC "4x" addresses:
 - A tip without a valid reading has all five values at 0. With
   `CFG_SENSOR_TYPE` ≠ 2 all six tactile words are 0.
 - Reading 9 registers (`0x02C0~0x02C8`) skips `gFLT`.
-- The tactile 1 LSB and ranges above use a provisional scale — to be
-  changed after the sensor's final specification
-  ([details](#tactile-8-bit-encoding--촉각-8비트-압축)).
+- Each field's full scale maps to the end of its byte range, so the
+  resolution differs per field ([details](#tactile-8-bit-encoding--촉각-8비트-압축)).
+  ⚠ The Fx / Fy range ±35 N is **provisional** (half of Fz) until the
+  shear-force range is specified.
 
 #### Tactile 8-bit encoding / 촉각 8비트 압축
 
 The tactile source registers are int16 at a ×100 scale ([mm × 100],
-[N × 100]). The block keeps each value in one byte at 1/20 of that scale:
-**1 LSB = 0.2 mm / 0.2 N**.
+[N × 100]). The block keeps each value in one byte, scaled so that the
+**full scale of each field lands on the end of the byte range**
+(uint8 → 255, int8 → ±127). The resolution — the value of one byte
+step — therefore differs per field:
 
-> ⚠ **Provisional scale** — 0.2 mm / 0.2 N (and the ranges that follow
-> from it) will be changed once the sensor's final specification is
-> confirmed. The SDKs keep it in one constant (`FAST_TACT_LSB`).
+| Field | Full scale | Source at full scale | Byte | Byte range | Resolution |
+|---|---|---|---|---|---|
+| `Px` | 32.0 mm (cell area) | 3200 | uint8 | 0 .. 255 | 32/255 ≈ 0.1255 mm |
+| `Py` | ±12.5 mm (pad width) | ±1250 | int8 | −127 .. +127 | 12.5/127 ≈ 0.0984 mm |
+| `Fx`, `Fy` | ±35 N ⚠ | ±3500 | int8 | −127 .. +127 | 35/127 ≈ 0.2756 N |
+| `Fz` | 70 N | 7000 | uint8 | 0 .. 255 | 70/255 ≈ 0.2745 N |
+
+> ⚠ **Fx / Fy ±35 N is provisional** — set to half of the Fz range until
+> the shear-force range is specified. Px, Py and Fz are final. The
+> firmware keeps the full scales in `aidin_modbus.h` (`FAST_PX_FS`,
+> `FAST_PY_FS`, `FAST_FXY_FS`, `FAST_FZ_FS`), the SDKs in
+> `registers` (`FAST_PX_MAX`, `FAST_PY_MAX`, `FAST_FXY_MAX`, `FAST_FZ_MAX`)
+> — change them together.
 >
-> 스케일은 현재 센서 최종 스펙 확정 후 변경 예정입니다.
+> Fx / Fy 범위(±35 N)는 전단력 사양 확정 전까지의 잠정값(Fz 범위의 절반)입니다.
 
 **Firmware packing** (per field, integer arithmetic):
 
 ```
-v    = source register                            # int16, ×100 scale
-v    = max(v, 0)                                  # Px and Fz only
-q    = (v >= 0) ? (v + 10) / 20 : (v - 10) / 20   # ÷20, round half away from zero
-q    = clamp(q, lo, hi)                           # Px, Fz: 0..255 · Py, Fx, Fy: −128..127
+v    = source register                      # int16, ×100 scale
+v    = max(v, 0)                            # Px and Fz only
+n    = v × qmax                             # qmax = 255 (Px, Fz) · 127 (Py, Fx, Fy); fits int32
+q    = (n >= 0) ? (n + fs/2) / fs           # ÷ full scale, round half away from zero
+                : (n - fs/2) / fs           #   (C integer division truncates toward zero)
+q    = clamp(q, lo, qmax)                   # Px, Fz: lo = 0 · Py, Fx, Fy: lo = −qmax
 byte = q & 0xFF
 ```
+
+`fs` is the source value at full scale: 3200 (Px) · 1250 (Py) ·
+3500 (Fx, Fy) · 7000 (Fz). −128 (`0x80`) is never produced, so the signed
+fields are symmetric.
 
 **Host decoding**:
 
 ```
-Px [mm] = byte × 0.2              Fz [N]     = byte × 0.2          # uint8
-Py [mm] = int8(byte) × 0.2        Fx, Fy [N] = int8(byte) × 0.2    # int8: byte ≥ 128 → byte − 256
+Px [mm] = byte × 32 / 255            Fz [N]     = byte × 70 / 255         # uint8
+Py [mm] = int8(byte) × 12.5 / 127    Fx, Fy [N] = int8(byte) × 35 / 127   # int8: byte ≥ 128 → byte − 256
 ```
 
 **Conversion examples**
 
-| Field | Source register | Physical | ÷ 20, rounded | After clamp | Byte | Decoded |
+| Field | Source register | Physical | × qmax / fs, rounded | After clamp | Byte | Decoded |
 |---|---|---|---|---|---|---|
-| `Px` | 1523 | 15.23 mm | 76 | 76 | `0x4C` | 15.2 mm |
+| `Px` | 1523 | 15.23 mm | 121.36 → 121 | 121 | `0x79` | 15.18 mm |
+| `Px` | 270 | 2.70 mm (smallest real contact point) | 21.52 → 22 | 22 | `0x16` | 2.76 mm |
 | `Px` | 0 | no contact point | 0 | 0 | `0x00` | 0 = no contact point |
-| `Py` | −412 | −4.12 mm | −21 | −21 | `0xEB` | −4.2 mm |
-| `Fx` | −87 | −0.87 N | −4 | −4 | `0xFC` | −0.8 N |
-| `Fy` | 230 | 2.30 N | 12 (11.5 → 12) | 12 | `0x0C` | 2.4 N |
-| `Fz` | 1234 | 12.34 N | 62 | 62 | `0x3E` | 12.4 N |
-| `Fz` | 9 | 0.09 N | 0 | 0 | `0x00` | 0.0 N |
-| `Fz` | 10 | 0.10 N | 1 (0.5 → 1) | 1 | `0x01` | 0.2 N |
-| `Fz` | −15 | −0.15 N (after tare) | 0 (negative → 0 first) | 0 | `0x00` | 0.0 N |
-| `Fx` | −3000 | −30.00 N | −150 | **−128** | `0x80` | −25.6 N |
-| `Fz` | 6000 | 60.00 N | 300 | **255** | `0xFF` | 51.0 N |
+| `Px` | 3200 | 32.00 mm (full scale) | 255 | 255 | `0xFF` | 32.00 mm |
+| `Py` | −412 | −4.12 mm | −41.86 → −42 | −42 | `0xD6` | −4.13 mm |
+| `Py` | −1250 | −12.50 mm (full scale) | −127 | −127 | `0x81` | −12.50 mm |
+| `Fx` | −87 | −0.87 N | −3.16 → −3 | −3 | `0xFD` | −0.83 N |
+| `Fy` | 230 | 2.30 N | 8.35 → 8 | 8 | `0x08` | 2.20 N |
+| `Fz` | 1234 | 12.34 N | 44.95 → 45 | 45 | `0x2D` | 12.35 N |
+| `Fz` | 13 | 0.13 N | 0.47 → 0 | 0 | `0x00` | 0.00 N |
+| `Fz` | 14 | 0.14 N | 0.51 → 1 | 1 | `0x01` | 0.27 N |
+| `Fz` | −15 | −0.15 N (after tare) | 0 (negative → 0 first) | 0 | `0x00` | 0.00 N |
+| `Fz` | 6000 | 60.00 N | 218.57 → 219 | 219 | `0xDB` | 60.12 N |
+| `Fx` | −4000 | −40.00 N (beyond range) | −145.14 → −145 | **−127** | `0x81` | −35.00 N |
+| `Fz` | 8000 | 80.00 N (beyond range) | 291.43 → 291 | **255** | `0xFF` | 70.00 N |
 
-- **Resolution**: inside the range the error is at most ±0.1 mm / ±0.1 N;
-  values smaller than that read 0.
-- **Range**: positions always fit — the cell area spans X 0..32 mm
-  (`Px` 0..160) and Y ±12.5 mm (`Py` ±63). Forces clamp beyond 51.0 N
-  (Fz) and +25.4 / −25.6 N (Fx, Fy) and stay at the end value; how a clamp
-  is flagged belongs to the tactile status (`status8`, under development).
+- **Resolution**: inside the range the error is at most half the resolution —
+  ±0.063 mm (`Px`), ±0.049 mm (`Py`), ±0.138 N (`Fx`, `Fy`), ±0.137 N
+  (`Fz`). Smaller forces read 0. Position resolution is finer than the
+  old 0.2 mm step; force resolution is coarser (0.27 N instead of 0.2 N)
+  because the force range grew from 51 N to 70 N.
+- **Range**: the position full scales are the cell area itself (X 0..32 mm,
+  Y ±12.5 mm), so positions always fit. Forces beyond 70 N (Fz) or ±35 N
+  (Fx, Fy) clamp and stay at the end value; how a clamp is flagged belongs
+  to the tactile status (`status8`, under development).
 - Fz is floored at 0, so a slightly negative reading after tare shows 0.
 
 #### Tactile status (`status8`) — (개발중, 구현 예정)
@@ -486,7 +513,7 @@ Slave 1, read 10 registers from `0x02C0`:
 
 ```
 Request : 01 03 02 C0 00 0A C4 49
-Response: 01 03 14 00 BB 00 C8 00 25 4C EB FC 0C 3E 69 00 00 00 00 00 48 00 00 37 14
+Response: 01 03 14 00 BB 00 C8 00 25 79 D6 FD 08 2D 69 00 00 00 00 00 48 00 00 49 F5
 ```
 
 | Register | Word | Decoded |
@@ -494,9 +521,9 @@ Response: 01 03 14 00 BB 00 C8 00 25 4C EB FC 0C 3E 69 00 00 00 00 00 48 00 00 3
 | `0x02C0` | `00 BB` | STATUS: gACT 1, gHOM 1, gGTO 1, gSTA 3 (Active), gOBJ 2 (stopped on an object while closing) |
 | `0x02C1` | `00 C8` | gPO = 200 |
 | `0x02C2` | `00 25` | gCU = 37 |
-| `0x02C3` | `4C EB` | right Px = 76 × 0.2 = **15.2 mm** · Py = int8(0xEB) = −21 → **−4.2 mm** |
-| `0x02C4` | `FC 0C` | right Fx = int8(0xFC) = −4 → **−0.8 N** · Fy = 12 → **2.4 N** |
-| `0x02C5` | `3E 69` | right Fz = 62 → **12.4 N** · status8 `0x69` (개발중 — not defined yet) |
+| `0x02C3` | `79 D6` | right Px = 121 × 32/255 = **15.18 mm** · Py = int8(0xD6) = −42 → × 12.5/127 = **−4.13 mm** |
+| `0x02C4` | `FD 08` | right Fx = int8(0xFD) = −3 → × 35/127 = **−0.83 N** · Fy = 8 → **2.20 N** |
+| `0x02C5` | `2D 69` | right Fz = 45 × 70/255 = **12.35 N** · status8 `0x69` (개발중 — not defined yet) |
 | `0x02C6`–`0x02C7` | `00 00 00 00` | left values 0 (no valid reading) |
 | `0x02C8` | `00 48` | left Fz = 0 · status8 `0x48` (개발중 — not defined yet) |
 | `0x02C9` | `00 00` | gFLT = 0 |

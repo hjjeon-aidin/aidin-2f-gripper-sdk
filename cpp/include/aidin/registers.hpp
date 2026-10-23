@@ -161,10 +161,16 @@ inline constexpr uint16_t TACT_TIP_BOTH  = 0x03;
 //   0x02C3..0x02C5 right tip: (Px8,Py8) (Fx8,Fy8) (Fz8,status8)   high byte first
 //   0x02C6..0x02C8 left tip:  same layout
 //   0x02C9 gFLT
-// Px8/Fz8 are uint8, Py8/Fx8/Fy8 int8; 1 LSB = 0.2 mm / 0.2 N (draft scale).
+// Px8/Fz8 are uint8, Py8/Fx8/Fy8 int8. Each field's full scale maps to the end
+// of its byte range (protocol v1.19.0): uint8 255, int8 +-127 (-128 unused):
+//   Px = byte * 32 / 255 mm        Fz     = byte * 70 / 255 N
+//   Py = int8 * 12.5 / 127 mm      Fx, Fy = int8 * 35 / 127 N
 // status8 = TACT_STATUS >> 8. Px8 is uint8 since v1.18.0 (int8 before).
-inline constexpr uint16_t FAST_BLOCK    = 0x02C0;
-inline constexpr uint16_t FAST_WORDS    = 10;
-inline constexpr float    FAST_TACT_LSB = 0.2f;
+inline constexpr uint16_t FAST_BLOCK   = 0x02C0;
+inline constexpr uint16_t FAST_WORDS   = 10;
+inline constexpr float    FAST_PX_MAX  = 32.0f;   // mm, uint8 0..255
+inline constexpr float    FAST_PY_MAX  = 12.5f;   // mm, int8 +-127
+inline constexpr float    FAST_FXY_MAX = 35.0f;   // N,  int8 +-127 (provisional: half of Fz)
+inline constexpr float    FAST_FZ_MAX  = 70.0f;   // N,  uint8 0..255
 
 } // namespace aidin::reg

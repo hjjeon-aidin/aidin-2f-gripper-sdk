@@ -316,8 +316,9 @@ class Gripper:
         Gripper status + position + current + fault and both fingertips'
         tactile resultant, refreshed atomically by the firmware, so the reply
         is one consistent snapshot (~4 ms at 115200 bps). Tactile values are
-        8-bit compressed (0.2 mm / 0.2 N). Firmware protocol >= v1.15.0;
-        pos_x decoding assumes >= v1.18.0 (uint8).
+        8-bit compressed over each field's full scale (Px 32 mm, Py +-12.5 mm,
+        Fx/Fy +-35 N, Fz 70 N). Firmware protocol >= v1.15.0; the scales
+        decode correctly only with >= v1.19.0.
         """
         regs = self._read_block(reg.FAST_BLOCK, reg.FAST_WORDS)
         st = regs[0]
@@ -508,12 +509,11 @@ def _tactile_tip(status: int, pos_x: float, pos_y: float, fx: float, fy: float,
 
 def _fast_tip(w: list[int]) -> TactileTip:
     """Decode one tip of the fast block: (Px8,Py8) (Fx8,Fy8) (Fz8,status8)."""
-    lsb = reg.FAST_TACT_LSB
     return _tactile_tip(
-        (w[2] & 0xFF) << 8,                    # status8 = TACT_STATUS[15:8]
-        round((w[0] >> 8) * lsb, 1),           # Px8 uint8
-        round(_s8(w[0] & 0xFF) * lsb, 1),      # Py8 int8
-        round(_s8(w[1] >> 8) * lsb, 1),        # Fx8 int8
-        round(_s8(w[1] & 0xFF) * lsb, 1),      # Fy8 int8
-        round((w[2] >> 8) * lsb, 1),           # Fz8 uint8
+        (w[2] & 0xFF) << 8,                                          # status8 = TACT_STATUS[15:8]
+        round((w[0] >> 8) * reg.FAST_PX_MAX / 255, 2),               # Px8 uint8
+        round(_s8(w[0] & 0xFF) * reg.FAST_PY_MAX / 127, 2),          # Py8 int8
+        round(_s8(w[1] >> 8) * reg.FAST_FXY_MAX / 127, 2),           # Fx8 int8
+        round(_s8(w[1] & 0xFF) * reg.FAST_FXY_MAX / 127, 2),         # Fy8 int8
+        round((w[2] >> 8) * reg.FAST_FZ_MAX / 255, 2),               # Fz8 uint8
     )
