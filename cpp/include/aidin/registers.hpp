@@ -62,6 +62,7 @@ inline constexpr uint16_t CFG_SERIAL_LO  = 0x0188;
 inline constexpr uint16_t CFG_SERIAL_HI  = 0x0189;
 inline constexpr uint16_t CFG_SENSOR_TYPE = 0x018A; // external sensor: 0=none, 1=AFT, 2=tactile
 inline constexpr uint16_t CFG_STROKE     = 0x018B;  // measured stroke [rad x 1000] (read-only; STROKE_CAL/full-init updates)
+inline constexpr uint16_t CFG_MB_RESP_DELAY = 0x018C;  // Modbus response delay [us] 0..65535, default 0 (v1.22.0): applied on write, SAVE_CONFIG persists
 
 // CFG_SENSOR_TYPE values. Applied at boot: write -> SAVE_CONFIG -> power cycle.
 inline constexpr uint16_t SENSOR_NONE    = 0;
@@ -79,9 +80,10 @@ inline constexpr uint16_t TRAJ_MAX_ACC = 0x019C;  // uint16 [rad/s^2], valid 1..
 // words — NOT a code. Supported: 9600, 19200, 38400, 57600, 115200 (default),
 // 230400, 460800, 921600, 1000000 (>= 460800 needs an adapter + RS485 line that
 // can carry it).
-// Write LO/HI -> DEV_CMD_SAVE_CONFIG -> power cycle; the UART switches
-// at the next boot. SAVE_CONFIG rejects an unsupported value (DEV_STATUS_ERROR,
-// nothing saved). Firmware <= v1.15.x stored the value but always ran at 115200.
+// Write LO/HI -> DEV_CMD_SAVE_CONFIG -> power cycle (or DEV_CMD_REBOOT on
+// firmware >= v1.20.0, while inactive); the UART switches at the next boot.
+// SAVE_CONFIG rejects an unsupported value (DEV_STATUS_ERROR, nothing saved).
+// Firmware <= v1.15.x stored the value but always ran at 115200.
 
 // Developer command registers (factory use only)
 inline constexpr uint16_t DEV_CMD    = 0x0180;
@@ -95,6 +97,8 @@ inline constexpr uint16_t DEV_CMD_TACTILE_SEND = 0x09;  // tactile CAN passthrou
 inline constexpr uint16_t DEV_CMD_STROKE_CAL   = 0x0A;  // stroke calibration (~20 s, needs rACT=1)
 inline constexpr uint16_t DEV_CMD_TRAJ_APPLY   = 0x0E;  // apply TRAJ_MAX_VEL/ACC (RAM only)
 inline constexpr uint16_t DEV_CMD_TACTILE_CMD  = 0x0F;  // tactile structured command (TACT_SCMD_*)
+inline constexpr uint16_t DEV_CMD_REBOOT       = 0x10;  // reset after the ACK -> saved config applies (fw >= v1.20.0;
+                                                        // ERROR while active/calibrating or on older firmware)
 
 // DEV_STATUS codes
 inline constexpr uint16_t DEV_STATUS_IDLE    = 0x00;

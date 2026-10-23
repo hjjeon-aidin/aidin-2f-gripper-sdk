@@ -61,6 +61,7 @@ CFG_SERIAL_LO:  Final[int] = 0x0188
 CFG_SERIAL_HI:  Final[int] = 0x0189
 CFG_SENSOR_TYPE: Final[int] = 0x018A  # external sensor: 0=none, 1=AFT, 2=tactile
 CFG_STROKE:     Final[int] = 0x018B   # measured stroke [rad x 1000] (read-only)
+CFG_MB_RESP_DELAY: Final[int] = 0x018C  # Modbus response delay [us] 0..65535, default 0 (v1.22.0): applied on write, SAVE_CONFIG persists
 
 # CFG_SENSOR_TYPE values. Applied at boot: write -> SAVE_CONFIG -> power cycle.
 SENSOR_NONE:    Final[int] = 0
@@ -71,9 +72,10 @@ SENSOR_TACTILE: Final[int] = 2
 # words - NOT a code. Supported: 9600, 19200, 38400, 57600, 115200 (default),
 # 230400, 460800, 921600, 1000000 (>= 460800 needs an adapter + RS485 line that
 # can carry it).
-# Write LO/HI -> DEV_CMD_SAVE_CONFIG -> power cycle; the UART switches
-# at the next boot. SAVE_CONFIG rejects an unsupported value (DEV_STATUS_ERROR,
-# nothing saved). Firmware <= v1.15.x stored the value but always ran at 115200.
+# Write LO/HI -> DEV_CMD_SAVE_CONFIG -> power cycle (or DEV_CMD_REBOOT on
+# firmware >= v1.20.0, while inactive); the UART switches at the next boot.
+# SAVE_CONFIG rejects an unsupported value (DEV_STATUS_ERROR, nothing saved).
+# Firmware <= v1.15.x stored the value but always ran at 115200.
 
 # Trajectory limit registers (protocol v1.11.0). rSP scales against these:
 #   vel = TRAJ_MAX_VEL * rSP/255, acc = TRAJ_MAX_ACC * rSP/255.
@@ -93,6 +95,8 @@ DEV_CMD_TACTILE_SEND: Final[int] = 0x09  # tactile CAN passthrough (TACT_CMD_*)
 DEV_CMD_STROKE_CAL:   Final[int] = 0x0A  # stroke calibration (~20 s, needs rACT=1)
 DEV_CMD_TRAJ_APPLY:   Final[int] = 0x0E  # apply TRAJ_MAX_VEL/ACC (RAM only)
 DEV_CMD_TACTILE_CMD:  Final[int] = 0x0F  # tactile structured command (TACT_SCMD_*)
+DEV_CMD_REBOOT:       Final[int] = 0x10  # reset after the ACK -> saved config applies (fw >= v1.20.0;
+                                         # ERROR while active/calibrating or on older firmware)
 
 # DEV_STATUS codes
 DEV_STATUS_IDLE:    Final[int] = 0x00

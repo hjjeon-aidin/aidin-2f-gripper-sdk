@@ -202,7 +202,7 @@ re-asserting) the others. This is also why `emergency_release()` writing
 
 | Bits | Name | Meaning |
 |---|---|---|
-| 0 | `gACT` | activated |
+| 0 | `gACT` | activated — drops to 0 when a fault disables the motor (firmware ≥ v1.19.1, [below](#fault-deactivation--폴트-시-비활성화)) |
 | 1 | `gHOM` | homed |
 | 3 | `gGTO` | echo of `rGTO` |
 | 4-5 | `gSTA` | `00`=Reset, `01`=Activating, `11`=Active |
@@ -229,6 +229,37 @@ history — check it for faults that came and went, then clear with
 | 10 | `INTERNAL_ERROR` | internal error — power-cycle, contact A/S if persistent |
 | 11 | `GATE_DRIVER_FAULT` | gate-driver hardware fault (OCP/OTSD/UVLO) — check supply/wiring, then `FAULT_CLEAR` |
 
+#### Fault deactivation / 폴트 시 비활성화
+
+Firmware protocol ≥ v1.19.1. If a fault disables the motor while the
+gripper is active, the firmware stops the motor and reports **`gACT` = 0,
+`gSTA` = 0 (Reset), `gGTO` = 0**, the same in `0x0200` and in the fast-poll
+block `0x02C0`. That covers motor-controller faults — over-current,
+over-temperature, under-voltage, encoder, internal (codes 4, 5, 6, 8,
+10) — and gate-driver faults (11).
+
+폴트로 모터 enable 이 풀리면 `gACT` 가 0 이 됩니다. 자동으로 다시 켜지지 않습니다.
+
+- **No automatic restart.** `rACT` stays 1 in `ACTION`, and motion
+  commands (move, home, force control, emergency release) are ignored
+  until the gripper is re-activated.
+- **Recovery**: remove the cause → `DEV_CMD 0x07 FAULT_CLEAR` → write
+  `rACT` = 0, then `rACT` = 1.
+
+  | | Python | C++ | ROS2 |
+  |---|---|---|---|
+  | Fault clear | `g.write_register(reg.DEV_CMD, reg.DEV_CMD_FAULT_CLEAR)` | `g.writeRegister(reg::DEV_CMD, reg::DEV_CMD_FAULT_CLEAR)` | `/aidin_gripper_driver/fault_clear` |
+  | Re-activate | `g.deactivate()` then `g.activate()` | `g.deactivate()` then `g.activate()` | — |
+
+  `activate()` alone writes `rACT` = 1 again, which is no change while
+  `rACT` is still 1, so call `deactivate()` first. If the fault is still
+  present, `gACT` drops back to 0 right after re-activation.
+- `gFLT` is the live fault: it can return to 0 once, for example, the
+  supply voltage recovers. `gACT` stays 0 until re-activation, and
+  `gFLTO` keeps the code until `FAULT_CLEAR`.
+- Firmware ≤ v1.19.0 kept `gACT` = 1 and `gSTA` = Active after such a fault
+  although the motor was off. The recovery steps were the same.
+
 #### Device config & developer channel / 장치 설정 (`0x0180~`)
 
 Config writes land in RAM only — persist them with `DEV_CMD 0x02
@@ -246,6 +277,7 @@ SAVE_CONFIG`; address/baud changes apply after a power cycle. 상세 절차는
 | `0x0188`/`0x0189` | R | `CFG_SERIAL_LO/HI` | serial number, 32-bit LO/HI |
 | `0x018A` | R/W | `CFG_SENSOR_TYPE` | fingertip sensor: 0 = none, 1 = AFT F/T, 2 = tactile — applied at boot |
 | `0x018B` | R | `CFG_STROKE_MRAD` | calibrated stroke [rad × 1000] — set only by `DEV_CMD 0x0A STROKE_CAL` |
+| `0x018C` | R/W | `CFG_MB_RESP_DELAY` | Modbus response delay [µs] 0–65535, default 0 — extra wait before the reply for masters that are slow to switch RS-485 back to receive (robot tool-flange ports); applied on write, persisted by `SAVE_CONFIG` (protocol v1.22.0) |
 | `0x0190~0x0196` | R/W | `PID_*` | position/speed/current loop gains — tuning only, see manual |
 | `0x0197~0x019A` | R/W | `FF_*` | position feedforward gains — applied via `DEV_CMD 0x0B/0x0C` |
 | `0x019B`/`0x019C` | R/W | `TRAJ_MAX_VEL/ACC` | trajectory limits (protocol v1.11.0) — vel [rad/s] 1..150 (boot default 100), acc [rad/s²] 1..800 (boot default 400). Applied via `DEV_CMD 0x0E TRAJ_APPLY`; RAM only, reboot restores defaults |
