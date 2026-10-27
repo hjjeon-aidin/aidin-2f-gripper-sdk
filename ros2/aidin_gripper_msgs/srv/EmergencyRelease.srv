@@ -1,5 +1,8 @@
-# Latched emergency release (rATR). Subsequent moves are ignored until
-# Activate is called again to clear the latch.
+# Emergency auto-release: pulses rATR with rACT held (rADR = direction); the
+# firmware drives the fingers fully open or closed and ends force control.
+# No latch: the gripper stays active and the next move_to works normally.
+# After a fault the write only re-activates the gripper and the release is
+# skipped (firmware >= v1.23) - call activate first, then emergency_release.
 
 bool close_direction false   # false = release open, true = release close
 ---

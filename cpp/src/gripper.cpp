@@ -16,8 +16,98 @@ namespace {
 
 constexpr auto kPollInterval = std::chrono::milliseconds(20);
 // rHOM/rATR are rising-edge triggered and rGTO re-execution needs a 0->1
-// pulse (protocol.md §1, v1.9.1) — hold each edge for this long.
+// pulse (protocol v1.9.1) — hold each edge for this long.
 constexpr auto kEdgePulse = std::chrono::milliseconds(20);
+// activate(): how long gACT may still read 0 after the rACT write before the
+// activation counts as refused. The firmware sets gACT=1 on the activating
+// write itself and drops it back to 0 when the motor cannot start.
+constexpr auto kActivateGrace = std::chrono::milliseconds(300);
+
+const char* faultName(uint8_t code) {
+    switch (code) {
+        case 0:  return "OK";
+        case 1:  return "not initialized";
+        case 2:  return "invalid command";
+        case 3:  return "invalid parameter";
+        case 4:  return "over-current";
+        case 5:  return "over-temperature";
+        case 6:  return "under-voltage";
+        case 7:  return "motor stall";
+        case 8:  return "sensor error";
+        case 9:  return "comm timeout";
+        case 10: return "internal error";
+        case 11: return "gate-driver fault";
+        default: return "unknown";
+    }
+}
+
+std::string faultText(uint8_t code) {
+    return std::to_string(code) + " (" + faultName(code) + ")";
+}
+
+std::string stateDetail(const GripperState& s) {
+    return std::string("gACT=") + (s.activated ? "1" : "0") +
+           ", gFLT=" + faultText(s.fault) + ", gFLTO=" + faultText(s.latchedFault);
+}
+
+// Blocking waits: stop as soon as the motor is off (gACT=0) or faulted.
+void throwIfStopped(const GripperState& s, const char* what) {
+    if (s.fault != 0 || !s.activated) {
+        throw GripperError(std::string(what) + " stopped: gripper not active or faulted (" +
+                           stateDetail(s) + ") - remove the cause, call activate(), "
+                           "then re-send the command");
+    }
+}
+
+std::string notExecutedText(const GripperState& s) {
+    if (!s.homed) return "moveTo not executed: gripper not homed (gHOM=0) - call home() first";
+    return "moveTo not executed (gGTO=0): force control is active (FC_MODE != 0), "
+           "or this write re-activated the gripper after a fault - re-send the move";
+}
+
+// Product code: 2 ASCII chars per word, high byte first, ends at the first 0x00.
+std::string decodeAscii(const uint16_t* words, size_t count) {
+    std::string s;
+    for (size_t i = 0; i < count; ++i) {
+        const unsigned bytes[2] = {static_cast<unsigned>(words[i] >> 8),
+                                   static_cast<unsigned>(words[i] & 0xFFu)};
+        for (const unsigned b : bytes) {
+            if (b == 0) return s;
+            s += (b >= 0x20 && b < 0x7F) ? static_cast<char>(b) : '?';
+        }
+    }
+    return s;
+}
+
+std::string pad4(unsigned v) {
+    std::string s = std::to_string(v);
+    return s.size() < 4 ? std::string(4 - s.size(), '0') + s : s;
+}
+
+// "<product code>-<YYMM>-<NNNN>"; "" = not recorded; no product code
+// (firmware <= v1.23) -> "<YYMM>-<NNNN>".
+std::string formatSerial(const uint16_t* code, size_t codeWords, uint16_t yymm, uint16_t number) {
+    const std::string pc = decodeAscii(code, codeWords);
+    if (pc.empty() && yymm == 0 && number == 0) return "";
+    const std::string tail = pad4(yymm) + "-" + pad4(number);
+    return pc.empty() ? tail : pc + "-" + tail;
+}
+
+// w = 0x01C4..0x01CB: [MAJOR][MINOR][PATCH][HASH_HI][HASH_LO][FLAGS][YYMM][DDHH]
+FirmwareInfo decodeFirmwareInfo(const uint16_t* w) {
+    FirmwareInfo fi;
+    fi.major     = w[0];
+    fi.minor     = w[1];
+    fi.patch     = w[2];
+    // Widen before shifting: uint16_t promotes to int, so w[3] << 16 would
+    // overflow (UB) for hashes with the top bit set.
+    fi.gitHash   = (static_cast<uint32_t>(w[3]) << 16) | static_cast<uint32_t>(w[4]);
+    fi.dirty     = (w[5] & reg::FW_BUILD_DIRTY)   != 0;
+    fi.noInfo    = (w[5] & reg::FW_BUILD_NO_INFO) != 0;
+    fi.buildYymm = w[6];
+    fi.buildDdhh = w[7];
+    return fi;
+}
 
 GripperStage stageOf(uint16_t st) {
     switch (st & reg::GSTA_MASK) {
@@ -226,6 +316,8 @@ bool Gripper::isConnected() const noexcept { return p_->shared && p_->shared->bu
 
 void Gripper::setResponseTimeout(std::chrono::milliseconds t) {
     if (p_->shared) {
+        // The bus may be in a transaction for another Gripper on this port.
+        std::lock_guard<std::mutex> lock(p_->shared->mutex);
         p_->shared->bus.setResponseTimeout(t);
     } else {
         // Not connected yet - remember it and apply once connect() opens
@@ -236,12 +328,25 @@ void Gripper::setResponseTimeout(std::chrono::milliseconds t) {
 
 void Gripper::activate(std::chrono::milliseconds timeout) {
     p_->write1(reg::ACTION, reg::RACT);
-    const auto deadline = std::chrono::steady_clock::now() + timeout;
-    while (std::chrono::steady_clock::now() < deadline) {
-        if (readState().stage == GripperStage::Active) return;
+    const auto start    = std::chrono::steady_clock::now();
+    const auto deadline = start + timeout;
+    bool seenActive = false;
+    for (;;) {
+        const auto s = readState();
+        if (s.stage == GripperStage::Active) return;
+        const auto now = std::chrono::steady_clock::now();
+        if (s.activated) {
+            seenActive = true;
+        } else if (seenActive || now - start >= kActivateGrace) {
+            throw GripperError("activate failed: gACT fell back to 0 (" + stateDetail(s) +
+                               ") - remove the cause and call activate() again (firmware <= v1.22: "
+                               "FAULT_CLEAR, deactivate(), then activate())");
+        }
+        if (now >= deadline) {
+            throw GripperError("activate timeout: gSTA never reached Active (" + stateDetail(s) + ")");
+        }
         std::this_thread::sleep_for(kPollInterval);
     }
-    throw GripperError("activate timeout (gSTA never reached Active)");
 }
 
 void Gripper::deactivate() {
@@ -266,9 +371,7 @@ void Gripper::home(std::chrono::milliseconds timeout) {
     const auto deadline = std::chrono::steady_clock::now() + timeout;
     while (std::chrono::steady_clock::now() < deadline) {
         const auto s = readState();
-        if (s.fault) {
-            throw GripperError("homing fault code=" + std::to_string(s.fault));
-        }
+        throwIfStopped(s, "home");
         if (s.homed) {
             // clear rHOM so next call sees a fresh rising edge
             p_->write1(reg::ACTION, reg::RACT);
@@ -295,9 +398,7 @@ void Gripper::fullInit(std::chrono::milliseconds timeout) {
     const auto deadline = std::chrono::steady_clock::now() + timeout;
     while (std::chrono::steady_clock::now() < deadline) {
         const auto s = readState();
-        if (s.fault) {
-            throw GripperError("full-init fault code=" + std::to_string(s.fault));
-        }
+        throwIfStopped(s, "full-init");
         const uint16_t dev = p_->read1(reg::DEV_STATUS);
         if (dev == reg::DEV_STATUS_RUNNING) sawRunning = true;
         if (dev == reg::DEV_STATUS_ERROR) {
@@ -331,7 +432,7 @@ void Gripper::moveTo(uint8_t position,
     p_->write1(reg::FORCE, force);
 
     // Firmware executes goto only on an rGTO rising edge OR an rPR change
-    // (protocol.md §1, v1.9.1). Re-issuing the same position while rGTO is
+    // (protocol v1.9.1). Re-issuing the same position while rGTO is
     // already high would be silently ignored — pulse rGTO 0->1 instead.
     const bool samePos = (p_->lastPosition == static_cast<int>(position));
     if (samePos && (p_->lastAction & reg::RGTO)) {
@@ -349,9 +450,10 @@ void Gripper::moveTo(uint8_t position,
     std::this_thread::sleep_for(std::chrono::milliseconds(30));
     while (std::chrono::steady_clock::now() < deadline) {
         const auto s = readState();
-        if (s.fault) {
-            throw GripperError("move fault code=" + std::to_string(s.fault));
-        }
+        throwIfStopped(s, "moveTo");
+        // gGTO=0 means the firmware is not executing any goto (gOBJ would
+        // stay Moving forever) — say why instead of timing out.
+        if (!s.goToActive) throw GripperError(notExecutedText(s));
         if (s.object != ObjectState::Moving) return;
         std::this_thread::sleep_for(kPollInterval);
     }
@@ -359,10 +461,10 @@ void Gripper::moveTo(uint8_t position,
 }
 
 void Gripper::emergencyRelease(bool closeDirection) {
-    // rATR is a rising edge processed only while rACT=1 (firmware ignores all
-    // commands with rACT low) — keep rACT set and pulse rATR. Writing rATR
-    // alone would just deactivate the motor without releasing, and would
-    // poison the firmware's edge tracking for the next attempt.
+    // rATR is a rising edge processed only together with rACT=1 (the firmware
+    // treats a write without rACT as deactivation) — keep rACT set and pulse
+    // rATR. Writing rATR alone would just deactivate the motor without
+    // releasing.
     uint16_t bits = reg::RACT | reg::RATR;
     if (closeDirection) bits |= reg::RADR;
     p_->write1(reg::ACTION, bits);
@@ -414,6 +516,20 @@ FastState Gripper::readFastState() {
     s.left       = fastTip(&buf[6]);
     s.fault      = static_cast<uint8_t>(buf[9] & 0xFF);
     return s;
+}
+
+std::string Gripper::readSerialNumber() {
+    std::array<uint16_t, reg::CFG_PRODUCT_CODE_WORDS> code{};
+    p_->readBlock(reg::CFG_PRODUCT_CODE, static_cast<uint16_t>(code.size()), code.data());
+    std::array<uint16_t, 2> serial{};   // [0] CFG_SERIAL_LO = NNNN, [1] CFG_SERIAL_HI = YYMM
+    p_->readBlock(reg::CFG_SERIAL_LO, static_cast<uint16_t>(serial.size()), serial.data());
+    return formatSerial(code.data(), code.size(), serial[1], serial[0]);
+}
+
+FirmwareInfo Gripper::readFirmwareInfo() {
+    std::array<uint16_t, reg::FW_INFO_WORDS> buf{};
+    p_->readBlock(reg::FW_VER_MAJOR, static_cast<uint16_t>(buf.size()), buf.data());
+    return decodeFirmwareInfo(buf.data());
 }
 
 TactilePair Gripper::readTactile() {

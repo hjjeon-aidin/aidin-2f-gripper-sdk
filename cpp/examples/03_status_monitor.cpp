@@ -1,6 +1,7 @@
 // Example 3: Continuously print gripper state changes.
 //
-// Connects to the gripper and polls state every 100 ms. Prints a line
+// Connects to the gripper, prints its firmware version and serial number
+// (firmware >= v1.25 / v1.24), then polls state every 100 ms. Prints a line
 // each time something interesting changes (position, current, object
 // state, or fault).  CTRL+C to stop.
 //
@@ -33,6 +34,9 @@ int main(int argc, char** argv) {
     try {
         aidin::Gripper g;
         g.connect(port);
+        const std::string serial = g.readSerialNumber();
+        std::cout << "Firmware " << g.readFirmwareInfo()
+                  << ", serial " << (serial.empty() ? "(not recorded)" : serial) << "\n";
         std::cout << "Monitoring " << port << " (CTRL+C to quit)\n";
 
         aidin::GripperState prev{};

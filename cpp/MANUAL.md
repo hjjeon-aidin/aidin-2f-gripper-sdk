@@ -31,10 +31,10 @@ semantics, and operational notes. For a quick build/run walk-through see
 |  Your C++ application     |               |  Aidin BLDC gripper        |
 |                           |   RS485       |  (STM32G431CB)             |
 |  aidin::Gripper           |  Modbus RTU   |                            |
-|  (this SDK)               |<------------->|  FreeModbus slave          |
-|       ^                   |  115200 8N1   |  DH-Robotics register map  |
-|       |  PImpl            |               |                            |
-|  ModbusRtu (in-tree)      |               |  Holding regs 0x0100..0207 |
+|  (this SDK)               |<------------->|  Modbus RTU slave          |
+|       ^                   |  115200 8N1   |  (FC03/06/16/23)           |
+|       |  PImpl            |               |  DH-Robotics register map  |
+|  ModbusRtu (in-tree)      |               |  Holding regs 0x0100..02C9 |
 +---------------------------+               +----------------------------+
         |
         |  USB-RS485 adapter (FTDI / CH340 / CP210x)
@@ -63,7 +63,7 @@ semantics, and operational notes. For a quick build/run walk-through see
 ```bash
 sudo apt update
 sudo apt install -y build-essential cmake git
-git clone <repo-url> aidin-2f-gripper-sdk
+git clone https://github.com/hjjeon-aidin/aidin-2f-gripper-sdk.git
 cd aidin-2f-gripper-sdk/cpp
 cmake -B build
 cmake --build build -j$(nproc)
@@ -87,7 +87,7 @@ Prerequisites:
 - USB-RS485 adapter driver (FTDI / CH340 / CP210x).
 
 ```powershell
-git clone <repo-url> aidin-2f-gripper-sdk
+git clone https://github.com/hjjeon-aidin/aidin-2f-gripper-sdk.git
 cd aidin-2f-gripper-sdk\cpp
 cmake -B build -G "Visual Studio 17 2022"
 cmake --build build --config Release
@@ -107,7 +107,7 @@ Or via FetchContent in your own project:
 ```cmake
 include(FetchContent)
 FetchContent_Declare(aidin_sdk
-    GIT_REPOSITORY <repo-url>
+    GIT_REPOSITORY https://github.com/hjjeon-aidin/aidin-2f-gripper-sdk.git
     GIT_TAG        main
     SOURCE_SUBDIR  cpp)
 FetchContent_MakeAvailable(aidin_sdk)
@@ -118,7 +118,7 @@ target_link_libraries(my_app PRIVATE aidin::gripper)
 
 | CMake option                   | Default | Effect |
 |--------------------------------|---------|--------|
-| `AIDIN_BUILD_EXAMPLES`         | `ON`    | Build the three example executables. Set `OFF` when consuming from a parent project. |
+| `AIDIN_BUILD_EXAMPLES`         | `ON`    | Build the five example executables. Set `OFF` when consuming from a parent project. |
 | `CMAKE_BUILD_TYPE`             | `Release` | Standard CMake — change to `Debug` for debug symbols. |
 
 ---
@@ -155,7 +155,7 @@ int main() try {
 |-------------|-------------|-------|
 | `port`      | (required)  | `/dev/ttyUSB0`, `/dev/ttyACM0` (Linux); `COM3`, `COM10` (Windows — `\\.\COM10` prefix is auto-applied). |
 | `baudrate`  | `115200`    | Firmware default. Configurable via register `0x0183`/`0x0184` (firmware protocol ≥ v1.16.0). Supported: 9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600, 1000000 (≥ 460800 needs an adapter and RS485 line that can carry it; Linux 1000000 needs `B1000000`). |
-| `parity`    | `'N'`       | `'N'` none, `'E'` even, `'O'` odd. Firmware ships with `'N'`. |
+| `parity`    | `'N'`       | Keep `'N'` — the firmware is fixed at 8N1. The transport also accepts `'E'`/`'O'`, which the gripper does not answer. |
 | `slaveId`   | `1`         | Firmware default. Configurable via register `0x0182` (range 1..247). |
 
 Data bits and stop bits are fixed at 8 / 1 (`8N1`).
@@ -163,19 +163,29 @@ Data bits and stop bits are fixed at 8 / 1 (`8N1`).
 ### Changing baud rate / slave ID
 
 ```cpp
+g.deactivate();                                                // REBOOT is refused while active
 g.writeRegister(aidin::reg::CFG_MB_ADDR,    7);                // slave 7
 g.writeRegister(aidin::reg::CFG_MB_BAUD_LO, 230400 & 0xFFFF);  // raw bps, LO word
 g.writeRegister(aidin::reg::CFG_MB_BAUD_HI, 230400 >> 16);     // raw bps, HI word
 g.writeRegister(aidin::reg::DEV_CMD, aidin::reg::DEV_CMD_SAVE_CONFIG);  // persist to flash
-// poll until DEV_STATUS leaves IDLE/RUNNING; expect DEV_STATUS_OK
+std::this_thread::sleep_for(std::chrono::milliseconds(100));   // flash write ~25 ms
+if (g.readRegister(aidin::reg::DEV_STATUS) != aidin::reg::DEV_STATUS_OK) { /* rejected */ }
+g.writeRegister(aidin::reg::DEV_CMD, aidin::reg::DEV_CMD_REBOOT);       // ACK, then reset
+g.disconnect();
+std::this_thread::sleep_for(std::chrono::seconds(1));
+g.connect(port, 230400, 'N', 7);                               // retry until it answers
 ```
-The new address/baud take effect at the **next boot** — power-cycle the
-gripper, then `connect()` with the new parameters. Until then the gripper keeps
-talking at the old settings. If the baud is not in the supported list,
-`SAVE_CONFIG` ends with `DEV_STATUS_ERROR`, nothing is saved, and
-`0x0183`/`0x0184` read back the previously configured value. Every device on
-one RS485 bus must use the same baud. Firmware older than protocol v1.16.0
-stores the value but always runs at 115200 — do not change the baud on it.
+The new address/baud take effect at the **next boot**: `DEV_CMD_REBOOT`
+(firmware ≥ v1.20.0) resets the gripper right after acknowledging the write;
+the first reply comes 0.5 – 0.9 s later. `REBOOT` ends with
+`DEV_STATUS_ERROR` (and no reset) while the motor is active, and on
+firmware ≤ v1.19 — power-cycle instead. Until the reboot the gripper keeps
+talking at the old settings. If the baud is not in the supported list, or
+the address is outside 1..247, `SAVE_CONFIG` ends with `DEV_STATUS_ERROR`,
+nothing is saved, and the register reads back the previously configured
+value. Every device on one RS485 bus must use the same baud. Firmware
+older than protocol v1.16.0 stores the value but always runs at 115200 —
+do not change the baud on it.
 
 ---
 
@@ -204,14 +214,36 @@ stores the value but always runs at 115200 — do not change the baud on it.
 | `gSTA = 1`       | `GripperStage::Activating`     | Activation in progress. |
 | `gSTA = 3`       | `GripperStage::Active`         | Fully active and ready for commands. |
 | `gOBJ = 0`       | `ObjectState::Moving`          | Fingers in motion. |
-| `gOBJ = 1`       | `ObjectState::OpenContact`     | Object contacted while opening. |
-| `gOBJ = 2`       | `ObjectState::ClosedContact`   | Object contacted while closing. |
-| `gOBJ = 3`       | `ObjectState::AtTarget`        | Reached commanded position. |
+| `gOBJ = 1`       | `ObjectState::OpenContact`     | Reserved — current firmware never reports it. |
+| `gOBJ = 2`       | `ObjectState::ClosedContact`   | Reserved — current firmware never reports it. |
+| `gOBJ = 3`       | `ObjectState::AtTarget`        | Move finished — also when an object stopped the fingers before the target. |
+
+**Grasp detection.** Contact is not reported through `gOBJ`. After `AtTarget`,
+compare `position` (gPO) with the commanded target (gPR): a closing move that
+stopped clearly short of the target means an object is held, and `current`
+(gCU) stays near the force limit. Choose the tolerance for your object.
 
 **Edge-triggered commands.** The firmware reacts on the *rising edge* of
 `rHOM` and `rATR`. The SDK handles this for you (it writes `rHOM=0`,
 sleeps briefly, then `rHOM=1`), but if you bypass via `writeRegister()`
 you must do the same.
+
+**Faults** (firmware ≥ v1.23.0). A fault while active (codes 4, 5, 6, 8,
+10, 11) — or a motor that does not start within 1.5 s of activation —
+takes the gripper back to `Reset`: `gACT` = 0, `gSTA` = 0, `gGTO` = 0, and
+the firmware clears `ACTION` (`rACT` reads 0). There is no automatic
+restart. Deactivation, by a fault or by `deactivate()`, also stops homing
+and stroke calibration and ends force control (`FC_MODE` = 0; v1.25.1); a
+completed homing reference (`gHOM` = 1) is kept.
+
+Recovery: **remove the cause → `activate()` → re-send the command.**
+`FAULT_CLEAR` is not needed (it only clears the `gFLTO` history). Every
+SDK command writes `rACT` = 1, so any command re-activates the gripper —
+but the firmware does not execute `rGTO`/`rHOM`/`rATR` on that first
+re-activating write (`rSP`/`rFR` and `0xA5` are applied). A normal
+activation from `Reset` that the host started processes every bit of its
+write (v1.25.1). On firmware v1.19.1 – v1.22.0 `rACT` stayed 1 after a
+fault: there, `FAULT_CLEAR`, `deactivate()`, then `activate()`.
 
 ---
 
@@ -219,7 +251,7 @@ you must do the same.
 
 All classes live in namespace `aidin`. Headers:
 - [`include/aidin/gripper.hpp`](include/aidin/gripper.hpp) — main API.
-- [`include/aidin/types.hpp`](include/aidin/types.hpp) — `GripperState`, `FastState`, `TactileTip`, `TactileRaw`, enums.
+- [`include/aidin/types.hpp`](include/aidin/types.hpp) — `GripperState`, `FastState`, `FirmwareInfo`, `TactileTip`, `TactileRaw`, enums.
 - [`include/aidin/registers.hpp`](include/aidin/registers.hpp) — register/bit constants.
 
 ### 6.1 Class `Gripper`
@@ -241,7 +273,10 @@ class Gripper {
 
     void activate(std::chrono::milliseconds timeout = 3s);
     void deactivate();
+    void stop();
     void home(std::chrono::milliseconds timeout = 15s);
+    void fullInit(std::chrono::milliseconds timeout = 30s);
+    void setTrajLimits(uint16_t maxVel, uint16_t maxAcc);
     void moveTo(uint8_t position,
                 uint8_t speed   = 128,
                 uint8_t force   = 128,
@@ -253,6 +288,9 @@ class Gripper {
     bool         isAtTarget();
     bool         hasFault();
     FastState    readFastState();                 // 0x02C0 block, one read
+
+    std::string  readSerialNumber();              // "BLDC2FV1-2610-0001", "" = not recorded
+    FirmwareInfo readFirmwareInfo();              // 0x01C4 block, one read
 
     TactilePair  readTactile();                   // {right, left}
     TactileRaw   readTactileRaw(uint16_t tip);    // reg::TACT_TIP_RIGHT / _LEFT
@@ -274,16 +312,27 @@ same instance silently disconnects the previous link first.
 
 #### `activate(timeout)`
 
-Writes `rACT=1` to register `0x0100`, then polls register `0x0200` every
-20 ms until `gSTA` reports `Active` (`0x3 << 4`). Throws on timeout.
-This is the first thing you must do after power-on; **homing and motion
-commands are rejected until `gSTA == Active`**.
+Writes `rACT=1` to register `0x0100`, then polls `0x0200..0x0207` every
+20 ms until `gSTA` reports `Active` (`0x3 << 4`). The firmware sets
+`gACT` = 1 on the activating write itself; if `gACT` falls back to 0 (a
+fault whose cause is still present, or the motor did not start within
+~1.5 s), or is still 0 after 300 ms, `activate()` throws at once with a
+message naming `gFLT` and `gFLTO` — otherwise it throws on timeout. This
+is the first thing to do after power-on, and the recovery step after a
+fault (§5).
 
 #### `deactivate()`
 
 Writes `rACT=0`. Does **not** wait — the firmware will free the motor
-and the next `readState()` will eventually report `Reset`. Use this for
-a clean shutdown.
+and the next `readState()` will eventually report `Reset`. Homing, stroke
+calibration and force control end (`FC_MODE` = 0, firmware ≥ v1.25.1).
+Use this for a clean shutdown.
+
+#### `stop()`
+
+Writes `rACT` alone (`rGTO` 1→0): an in-flight motion stops and the
+position regulator keeps holding where the fingers are. The gripper stays
+active.
 
 #### `home(timeout)`
 
@@ -292,34 +341,59 @@ Triggers a homing sequence. Internally:
 2. Sleeps 20 ms so the firmware sees the low level.
 3. Writes `rACT|rHOM` (rising edge).
 4. Sleeps 100 ms (lets firmware clear `gHOM` before we poll).
-5. Polls every 50 ms until `gHOM=1`, throwing on `gFLT != 0` or timeout.
+5. Polls every 50 ms until `gHOM=1`, throwing as soon as `gACT = 0` or
+   `gFLT != 0` (the message names `gFLT`/`gFLTO`), or on timeout.
 6. Clears `rHOM` so the next call sees a fresh edge.
 
 Default timeout is 15 s — homing on a closed gripper typically completes
 in 1–5 s, but a cold start or a high-friction load can take longer.
+Homing runs at 100 % current whatever `rFR` is, at half the `rSP` speed
+(firmware ≥ v1.25.1; with a very low `rSP`, about < 10, homing from the
+closed position may not finish within the firmware's 10 s timeout).
+
+#### `fullInit(timeout)`
+
+Writes `rACT`, then the value `0xA5` to `ACTION` (DH-compatible full
+initialization, firmware ≥ v1.12.0): open homing, then a close-contact
+stroke measurement saved to flash (`CFG_STROKE`, `0x018B`). Works from
+the inactive state. Waits for `DEV_STATUS` RUNNING → OK and `gHOM` = 1;
+throws on `DEV_STATUS` ERROR (rejected, or interrupted by a
+deactivation), as soon as `gACT = 0` / `gFLT != 0`, or on timeout. The
+fingers sweep the full stroke twice — keep the workspace clear.
 
 #### `moveTo(position, speed, force, blocking, timeout)`
 
 | Arg        | Range     | Meaning |
 |------------|-----------|---------|
 | `position` | 0..255    | 0 = fully open, 255 = fully closed. Linear mapping. |
-| `speed`    | 0..255    | 0 = slowest non-zero, 255 = max. |
-| `force`    | 0..255    | Current limit. 255 ≈ rated peak current. |
-| `blocking` | bool      | If `true`, polls until `gOBJ != Moving` (target reached or object hit). |
+| `speed`    | 0..255    | Velocity and acceleration limits = trajectory limits (`setTrajLimits`, default 100 rad/s · 400 rad/s²) × speed/255, each at least 1. |
+| `force`    | 0..255    | Current limit = rated current × force/255. **0 = no force** — the fingers cannot move. |
+| `blocking` | bool      | If `true`, polls until `gOBJ != Moving` (move finished — target reached or stopped on an object). |
 | `timeout`  | duration  | Only used when `blocking=true`. |
 
-The SDK writes registers `0x0101`, `0x0102`, `0x0103` first, then sets
-`rACT|rGTO` at `0x0100`. The firmware treats this as a single atomic
-"go" command — speed and force apply to this and subsequent moves until
-overwritten.
+The SDK writes `rSP` (`0x0101`), `rFR` (`0x0102`), then `rPR` (`0x0103`,
+skipped when unchanged), then `rACT|rGTO` at `0x0100`. The firmware runs
+a goto on an `rGTO` rising edge or an `rPR` change (v1.9.1), so when the
+position equals the last one sent the SDK first writes `rACT` alone (an
+`rGTO` 0→1 pulse) to make the firmware plan a fresh trajectory. While
+active, `rSP`/`rFR` apply as soon as they are written; written while
+inactive they apply at activation (v1.25.1).
+
+With `blocking=true` the call throws as soon as `gACT = 0` or
+`gFLT != 0`, and — instead of waiting for a timeout — when `gGTO` reads 0,
+i.e. the firmware is not executing the move: not homed, force control
+active (`FC_MODE != 0`), or the write re-activated the gripper after a
+fault (re-send the move then).
 
 #### `emergencyRelease(closeDirection)`
 
-Sets `rATR=1` (and optionally `rADR=1` to release in the closing
-direction). The firmware drives the gripper to its open or closed limit
-at a fixed safe speed. This is a **latched, one-shot** command —
-subsequent moves are ignored until you call `activate()` again to clear
-the latch.
+Writes `rACT|rATR` (`|rADR` to release in the closing direction), waits
+20 ms, then writes `rACT`. The firmware drives the fingers fully open (or
+closed) and ends force control (`FC_MODE` = 0). There is no latch: the
+gripper stays active and the next `moveTo()` works normally. The call
+does not wait for the fingers. After a fault the write only
+re-activates the gripper and the release is skipped (firmware ≥ v1.23) —
+call `activate()` first, then `emergencyRelease()`.
 
 #### `readState()`
 
@@ -371,12 +445,37 @@ the sensor as feedback. `tactileCommand()` is the generic form
 current Fx/Fy/Fz of every valid tip becomes zero (F/T or tactile). RAM
 only — cleared on reboot.
 
+#### `readSerialNumber()`
+
+Two reads — the product code (`0x01C0`, 4 registers) and `0x0188..0x0189`
+— assembled into `"<product code>-<YYMM>-<NNNN>"`, e.g.
+`"BLDC2FV1-2610-0001"` (firmware ≥ v1.24.0, §7.7). Returns `""` when
+nothing is recorded (all words 0). Firmware ≤ v1.23 has no product code,
+so the result is just `"YYMM-NNNN"`. Non-printable bytes in the product
+code show as `?`.
+
+#### `readFirmwareInfo()`
+
+One read of `0x01C4..0x01CB` (§7.7), decoded into `FirmwareInfo`
+(§6.3): version, git hash, dirty / no-git flags, build time.
+`toString()` gives `"1.25.1 (1a2b3c4d)"` or `"1.25.1 (1a2b3c4d-dirty)"`.
+Firmware ≤ v1.24 reads all 0: `hasVersion()` is false and `toString()`
+is `"<= 1.24 (no version registers)"`.
+
+```cpp
+const aidin::FirmwareInfo fw = g.readFirmwareInfo();
+std::cout << "firmware " << fw << ", built " << fw.buildTime() << "\n";
+const std::string sn = g.readSerialNumber();
+std::cout << "serial " << (sn.empty() ? "(not recorded)" : sn) << "\n";
+```
+
 #### `readRegister()` / `writeRegister()`
 
-Raw Modbus access for configuration registers (`0x0180..0x0189`) and
-PID gains (`0x0190..0x0196`). The address is the **protocol-level PDU
-address**, identical to what is written in the firmware register-map
-table — no offset arithmetic.
+Raw Modbus access for configuration registers (`0x0180..0x018C`,
+`0x01C0..`), PID gains (`0x0190..0x0196`), force control (`0x01A0..`) and
+anything else in the map. The address is the **protocol-level PDU
+address**, identical to what is written in the register-map tables — no
+offset arithmetic.
 
 ### 6.2 `struct GripperState`
 
@@ -393,14 +492,29 @@ struct GripperState {
     uint8_t      current;       // gCU  0..255
     uint8_t      speed;         // gSP  0..255
     float        voltage;       // V (gV * 0.1)
-    uint8_t      latchedFault;  // gFLTO (sticky; cleared by DEV_CMD_FAULT_CLEAR)
+    uint8_t      latchedFault;  // gFLTO (fault history; kept until DEV_CMD_FAULT_CLEAR, re-activating does not clear it)
 };
 ```
 
 `operator<<(std::ostream&, const GripperState&)` produces a one-line
 debug dump.
 
-### 6.3 Tactile and fast-poll types
+### 6.3 Device info, tactile and fast-poll types
+
+```cpp
+struct FirmwareInfo {               // 0x01C4..0x01CB (fw >= v1.25.0; all 0 on older firmware)
+    uint16_t major, minor, patch;   // = protocol Spec version, e.g. 1.25.1
+    uint32_t gitHash;               // build commit, first 8 hex digits (0 when noInfo)
+    bool     dirty;                 // built with uncommitted changes
+    bool     noInfo;                // built without git info
+    uint16_t buildYymm, buildDdhh;  // 2610 = 2026-10, 2714 = day 27, 14 h (build PC local time)
+    bool        hasVersion() const; // false on firmware <= v1.24
+    std::string version() const;    // "1.25.1"
+    std::string toString() const;   // "1.25.1 (1a2b3c4d)", "1.25.1 (1a2b3c4d-dirty)", "<= 1.24 (no version registers)"
+    std::string buildTime() const;  // "2026-10-27 14h", "" when not recorded
+};
+```
+
 
 ```cpp
 enum class TactileLink : uint8_t {
@@ -443,27 +557,37 @@ struct FastState {                  // 0x02C0..0x02C9 snapshot
 firmware sends raw channels instead of results) · `Waiting` (results
 arrive but are invalid — sensor zeroing, ≈ 4.5 s after power-up or
 ≈ 1.25 s after `tactileZero()`) · `Live`. `toString(TactileLink)` and
-`operator<<` for `TactileTip` / `FastState` are provided.
+`operator<<` for `TactileTip` / `FastState` / `FirmwareInfo` are provided.
 
 ---
 
 ## 7. Protocol reference (Modbus registers)
 
 The firmware exposes a **DH-Robotics RTU compatible** holding-register
-map. The constants in `aidin::reg::*` mirror these addresses 1:1.
+map. The constants in `aidin::reg::*` mirror these addresses 1:1. The full
+reference is the Aidin Gripper Modbus RTU Protocol Manual Rev 2.6 (Spec
+v1.25.1), provided with the product.
+
+Transport (firmware ≥ v1.21): FC03 / FC06 / FC16 / FC23, anything else
+gets exception 01. A request ends after max(3.5 characters, 750 µs) of
+line silence and the reply starts ≈ 7 µs later — ≈ 0.76 ms above
+19200 bps, no jitter (plus `CFG_MB_RESP_DELAY`). Flash writes stop the
+firmware for ≈ 25 ms; requests sent meanwhile get no reply.
 
 ### 7.1 Command registers (master → slave, function 0x06 / 0x10)
 
 | PDU addr | Field  | Range | Description |
 |----------|--------|-------|-------------|
-| `0x0100` | rACT   | bit 0 | 0=reset, 1=activate |
+| `0x0100` | rACT   | bit 0 | 0=deactivate, 1=activate. The other bits are processed only in writes with rACT=1 while active; cleared by the firmware on a fault (v1.23) |
 | `0x0100` | rHOM   | bit 1 | rising edge starts homing |
-| `0x0100` | rGTO   | bit 3 | 0=stop, 1=go to `rPR` |
-| `0x0100` | rATR   | bit 4 | emergency release latch |
+| `0x0100` | rGTO   | bit 3 | 0=stop, 1=go to `rPR` (runs on a 0→1 edge or an `rPR` change) |
+| `0x0100` | rATR   | bit 4 | rising edge: emergency auto-release, written together with rACT |
 | `0x0100` | rADR   | bit 5 | 0=release open, 1=release close |
-| `0x0101` | rSP    | 0..255 | speed |
-| `0x0102` | rFR    | 0..255 | force (current limit) |
+| `0x0101` | rSP    | 0..255 | speed: velocity/acceleration limit = trajectory limit × rSP/255 (boot default 128) |
+| `0x0102` | rFR    | 0..255 | force: current limit = rated current × rFR/255, 0 = no force (boot default 255) |
 | `0x0103` | rPR    | 0..255 | target position (0=open, 255=close) |
+
+`rSP`/`rFR` written while inactive apply at activation (v1.25.1).
 
 ### 7.2 Status registers (slave → master, function 0x03)
 
@@ -473,14 +597,14 @@ map. The constants in `aidin::reg::*` mirror these addresses 1:1.
 | `0x0200` | gHOM   | bit 1 — homing complete |
 | `0x0200` | gGTO   | bit 3 — go-to echo |
 | `0x0200` | gSTA   | bits 5:4 — 0=reset, 1=activating, 3=active |
-| `0x0200` | gOBJ   | bits 7:6 — 0=moving, 1=open contact, 2=close contact, 3=at target |
+| `0x0200` | gOBJ   | bits 7:6 — 0=moving, 3=move finished; 1/2 (contact) reserved, not reported |
 | `0x0201` | gFLT   | current fault code |
 | `0x0202` | gPR    | echo of last `rPR` |
 | `0x0203` | gPO    | actual position (0..255) |
 | `0x0204` | gCU    | actual current (0..255) |
 | `0x0205` | gSP    | actual speed (0..255) |
 | `0x0206` | gV     | supply voltage in 0.1 V units (e.g. 240 = 24.0 V) |
-| `0x0207` | gFLTO  | latched fault code (sticky) |
+| `0x0207` | gFLTO  | fault history (kept until `DEV_CMD 0x07 FAULT_CLEAR`) |
 
 ### 7.3 Configuration registers (factory / installer)
 
@@ -492,13 +616,18 @@ map. The constants in `aidin::reg::*` mirror these addresses 1:1.
 | `0x0185` | `CFG_CAN_ID`     | FDCAN node ID |
 | `0x0186` | `CFG_CAN_RATE`   | 1 = 1 Mbps, 2 = 500 kbps |
 | `0x0187` | `CFG_DEV_TYPE`   | 101 = Aidin gripper, 102 = Apicoo, 103 = AFT200, 104 = AFT150 |
-| `0x0188` | `CFG_SERIAL_LO`  | Serial number (low 16 bits) |
-| `0x0189` | `CFG_SERIAL_HI`  | Serial number (high 16 bits) |
+| `0x0188` | `CFG_SERIAL_LO`  | Serial number: production number NNNN, 1..9999 (v1.24.0, §7.7) |
+| `0x0189` | `CFG_SERIAL_HI`  | Serial number: production YYMM as a decimal value, 2610 = 2026-10 (v1.24.0) |
+| `0x018A` | `CFG_SENSOR_TYPE` | Fingertip sensor: 0 = none, 1 = AFT F/T, 2 = tactile — applied immediately on `SAVE_CONFIG` / `LOAD_CONFIG` |
+| `0x018B` | `CFG_STROKE`     | Measured stroke [rad × 1000], read-only — set by `STROKE_CAL` / `fullInit()` |
+| `0x018C` | `CFG_MB_RESP_DELAY` | Extra Modbus response delay [µs], 0..65535 (default 0) — applied on write (v1.22.0) |
 
-Configuration changes require a developer command write to `0x0180` to
-persist into flash. Consult the firmware source for the command code
-constants — these are factory-tool territory and exposed only through
-`writeRegister()`.
+Config writes land in RAM. Persist them with
+`writeRegister(reg::DEV_CMD, reg::DEV_CMD_SAVE_CONFIG)`
+(`DEV_CMD_LOAD_CONFIG` reloads the flash values); the slave address and
+baud apply at the next boot (`DEV_CMD_REBOOT`, §4). The `DEV_CMD_*`
+constants this SDK uses are in `registers.hpp`; the full command list is
+in the Protocol Manual §3.
 
 ### 7.4 PID gain registers
 
@@ -514,9 +643,10 @@ constants — these are factory-tool territory and exposed only through
 
 ### 7.5 Tactile sensor registers
 
-Active when `CFG_SENSOR_TYPE` (`0x018A`) = 2 — write it, `DEV_CMD 0x02
-SAVE_CONFIG`, power-cycle. Firmware protocol ≥ v1.13.0; the gripper-frame
-coordinates below need ≥ v1.18.0. Tip 1 = right finger, tip 2 = left.
+Active when `CFG_SENSOR_TYPE` (`0x018A`) = 2 — write it, then `DEV_CMD
+0x02 SAVE_CONFIG` (applies immediately, no reboot). Firmware protocol
+≥ v1.13.0; the gripper-frame coordinates below need ≥ v1.18.0. Tip 1 =
+right finger, tip 2 = left.
 
 | Tip 1 | Tip 2 | Field | Description |
 |-------|-------|-------|-------------|
@@ -553,13 +683,33 @@ cycles.
 | `0x02C5` / `0x02C8` | `Fz8` (uint8) | `status8` = `TACT_STATUS >> 8` |
 | `0x02C9` | 0 | `gFLT` |
 
-8-bit tactile values: each field's full scale maps to the end of its byte
-range — `Px8` 0..255 ↔ 0..32 mm, `Py8` ±127 ↔ ±12.5 mm, `Fx8`/`Fy8` ±127 ↔
-±35 N (provisional), `Fz8` 0..255 ↔ 0..70 N (protocol ≥ v1.19.0);
-out-of-range values clamp and set `saturated`. `Px8` is uint8 since
-v1.18.0 (int8 before). With `CFG_SENSOR_TYPE` ≠ 2 the six tactile words
-are 0. Packing rules, a decoded wire example, PLC addressing and polling
-timing per baud rate: [root README](../README.md#fast-poll-block--고속-폴링-블록-0x02c00x02c9).
+`status8` bits: b0 valid · b1 saturated · b2 timeout · b3 connected ·
+b4 raw_stream · b5 contact · b6 seen · b7 raw_fresh (the `TACT_STATUS`
+bits of §7.5, shifted down by 8). 8-bit tactile values: each field's full
+scale maps to the end of its byte range — `Px8` 0..255 ↔ 0..32 mm, `Py8`
+±127 ↔ ±12.5 mm, `Fx8`/`Fy8` ±127 ↔ ±35 N (provisional), `Fz8` 0..255 ↔
+0..70 N (protocol ≥ v1.19.0); out-of-range values clamp and set
+`saturated`. `Px8` is uint8 since v1.18.0 (int8 before). With
+`CFG_SENSOR_TYPE` ≠ 2 the six tactile words are 0. Packing rules, a
+decoded wire example, PLC addressing and polling timing per baud rate:
+[root README](../README.md#fast-poll-block--고속-폴링-블록-0x02c00x02c9).
+
+### 7.7 Serial number and firmware info (`0x01C0..0x01CB`)
+
+| PDU addr | Field | Description |
+|----------|-------|-------------|
+| `0x01C0~0x01C3` | `CFG_PRODUCT_CODE` | R/W. Serial-number product code, ASCII ≤ 8 chars, 2 per register, high byte first (`0x01C0` = `'B','L'` = `0x424C`), unused bytes 0 (v1.24.0) |
+| `0x0189` / `0x0188` | `CFG_SERIAL_HI` / `_LO` | R/W. Production YYMM (decimal) / production number NNNN (§7.3) |
+| `0x01C4~0x01C6` | `FW_VER_MAJOR` / `MINOR` / `PATCH` | R. Firmware version = protocol Spec version (v1.25.0) |
+| `0x01C7` / `0x01C8` | `FW_GIT_HASH_HI` / `LO` | R. Build commit, first 8 hex digits, 4 per register |
+| `0x01C9` | `FW_BUILD_FLAGS` | R. b0 `FW_BUILD_DIRTY` (uncommitted changes) · b1 `FW_BUILD_NO_INFO` (no git info, hash 0) |
+| `0x01CA` / `0x01CB` | `FW_BUILD_YYMM` / `DDHH` | R. Build time, decimal: 2610 = 2026-10, 2714 = day 27, 14 h (build PC local time) |
+
+Serial number = `<product code>-<YYMM>-<NNNN>`, e.g. `BLDC2FV1-2610-0001`;
+all words 0 = not recorded. Write the three parts, then `SAVE_CONFIG`.
+Firmware ≤ v1.23 has no product code (reads 0, not saved) and firmware
+≤ v1.24 reads 0 in `0x01C4~0x01CB` (version 0.0.0). `readSerialNumber()`
+and `readFirmwareInfo()` (§6.1) do the decoding.
 
 ---
 
@@ -574,34 +724,64 @@ All methods that may fail throw `aidin::GripperError` (derived from
 | `connect()`                     | `connect failed: unsupported baud rate: ...` |
 | any read/write                  | `read 0x0200 failed: response timeout`   |
 | any read/write                  | `write 0x0100 failed: crc error` / `modbus exception code N` |
-| `activate()` / `home()` / blocking `moveTo()` | `... timeout`            |
-| `home()` / blocking `moveTo()`  | `homing fault code=N`, `move fault code=N` |
+| `activate()`                    | `activate failed: gACT fell back to 0 (gACT=0, gFLT=6 (under-voltage), gFLTO=6 (under-voltage)) - remove the cause and call activate() again ...` |
+| `home()` / `fullInit()` / blocking `moveTo()` | `home stopped: gripper not active or faulted (gACT=0, gFLT=..., gFLTO=...) - remove the cause, call activate(), then re-send the command` |
+| blocking `moveTo()`             | `moveTo not executed (gGTO=0): ...` / `moveTo not executed: gripper not homed (gHOM=0) ...` |
+| `fullInit()`                    | `full-init rejected or failed (DEV_STATUS=ERROR)` |
+| `activate()` / `home()` / `fullInit()` / blocking `moveTo()` | `... timeout` |
 
-The exception message embeds the OS error (`strerror` / Win32 error code)
-or the transport-level failure (timeout, CRC, Modbus exception code), so
-it tells you precisely which layer failed.
+The exception message embeds the OS error (`strerror` / Win32 error code),
+the transport-level failure (timeout, CRC, Modbus exception code), or the
+gripper state that stopped a blocking call (`gACT`, `gFLT` = live fault,
+`gFLTO` = fault history), so it tells you precisely which layer failed.
 
-A typical retry-on-timeout pattern:
+**Fault recovery** (firmware ≥ v1.23): a fault switches the gripper off and
+clears `rACT`. Remove the cause, call `activate()`, then re-send the
+command — the first re-activating write does not execute
+`rGTO`/`rHOM`/`rATR`, so the command that hit the fault (or any command
+sent right after it) has to be sent again. `FAULT_CLEAR` is not needed;
+it only clears the `gFLTO` history.
+
 ```cpp
-for (int attempt = 0; attempt < 3; ++attempt) {
-    try { g.moveTo(255, 200, 128, true); break; }
-    catch (const aidin::GripperError& e) {
-        if (attempt == 2) throw;
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    }
+try {
+    g.moveTo(255, 200, 128, true);
+} catch (const aidin::GripperError& e) {
+    std::cerr << e.what() << "\n";     // names gFLT / gFLTO
+    // remove the cause (supply, load, temperature), then:
+    g.activate();                      // throws again if the fault is still present
+    g.moveTo(255, 200, 128, true);     // re-send
 }
 ```
+
+Retry plain transport errors (timeouts, CRC) after a short pause — for
+example a request that arrived during a ≈ 25 ms flash write gets no
+reply. Do not blindly retry a "stopped" or "not executed" error: fix the
+cause first.
 
 ---
 
 ## 9. Threading model
 
-- One `Gripper` instance owns one Modbus context and **is not
-  thread-safe**. Wrap your own mutex if multiple threads must share an
-  instance.
+- **Transactions are serialized per port.** Every Modbus transaction (one
+  register read or write) holds the mutex of the shared bus object for
+  that port, so `Gripper` instances on the same port (multi-drop) never
+  interleave bytes on the wire. The lock covers one transaction only — a
+  15 s `home()` on one gripper does not block another gripper's polling.
+- **One instance, one thread.** A single `Gripper` is not safe to drive
+  from several threads at once: its commands are multi-step (`moveTo()`
+  is up to five writes plus a sleep), and it keeps per-instance state
+  (last `ACTION` / `rPR` written, for the `rGTO` pulse) without a lock.
+  `connect()` / `disconnect()` must not race with calls on the same
+  instance either. Use one instance per thread, or wrap your own mutex
+  around every call (the ROS2 driver does this).
+- **Multiple instances in parallel are fine** — on different ports, or on
+  the same port with different slave IDs. The only global state is the
+  process-wide port registry (mutex-protected) that lets instances share
+  an open port; the port closes when the last instance using it
+  disconnects.
+- `setResponseTimeout()` changes the deadline for every instance on that
+  port (it is a property of the shared bus).
 - The SDK never spawns background threads.
-- Multiple `Gripper` instances may be used in parallel as long as each
-  has its own serial port — there is no global state.
 
 ---
 
@@ -632,8 +812,9 @@ A clean `disconnect()` runs via the `Gripper` destructor.
 
 ### 10.3 `03_status_monitor.cpp`
 
-Continuous polling at 100 ms intervals. Prints only when something
-changes — useful as a live readout during commissioning.
+Prints the firmware version and serial number (`readFirmwareInfo()`,
+`readSerialNumber()`), then polls at 100 ms intervals and prints only when
+something changes — useful as a live readout during commissioning.
 
 ### 10.4 `04_tactile_monitor.cpp`
 
@@ -658,16 +839,16 @@ second — a quick way to see what the bus allows at your baud rate.
 
 | Symptom                                                | Likely cause                                                      | Fix |
 |--------------------------------------------------------|-------------------------------------------------------------------|-----|
-| `modbus_connect failed: No such file or directory`     | Wrong port name or adapter not plugged in                          | Check `dmesg` (Linux) or Device Manager (Windows) |
-| `modbus_connect failed: Permission denied`             | Linux: user not in `dialout`                                       | `sudo usermod -a -G dialout $USER`, re-login |
-| All reads time out                                     | Wrong baud / parity / slave ID; or RS485 A/B swapped               | Swap A↔B, try `parity='E'`, try `slaveId=1` |
+| `connect failed: open ...: No such file or directory`  | Wrong port name or adapter not plugged in                          | Check `dmesg` (Linux) or Device Manager (Windows) |
+| `connect failed: open ...: Permission denied`          | Linux: user not in `dialout`                                       | `sudo usermod -a -G dialout $USER`, re-login |
+| All reads time out                                     | Wrong baud or slave ID; or RS485 A/B swapped                       | Swap A↔B, check the baud and `slaveId` (parity is fixed at `'N'`) |
 | Reads succeed but values stay zero                     | Adapter on different RS485 segment / no termination                | Add 120 Ω termination at both ends |
-| `activate timeout` after `connect()`                   | Power supply too low, or latched fault                             | Inspect `g.readRegister(0x0207)` (gFLTO) |
-| `home timeout`                                         | Mechanical jam, or backoff distance exceeds workspace              | Manually back the fingers off and retry |
-| Gripper moves once then ignores commands               | `rATR` latched after an `emergencyRelease()`                       | Call `activate()` again to clear the latch |
-| `moveTo` reports `AtTarget` instantly                  | Previous target was the same value                                 | Vary `position` by ≥1, or read state once before moving |
-| Examples build but link fails with `ws2_32`            | Windows-only — link `ws2_32`                                       | The wrapper handles this; check you used the vendored `CMakeLists.txt` |
-| Tactile tip stays `NotDetected`                        | `CFG_SENSOR_TYPE` ≠ 2, or sensor cable                             | Write `0x018A = 2`, `DEV_CMD 0x02`, power-cycle |
+| `activate failed: gACT fell back to 0 (...)`           | A fault is still present (or the motor did not start)              | The message names `gFLT` (live fault, `0x0201`): remove that cause (supply, load, temperature), then `activate()` again. `gFLTO` is only the history |
+| `... stopped: gripper not active or faulted (...)`     | A fault switched the gripper off, or it was deactivated            | Remove the cause, `activate()`, re-send the command |
+| `moveTo not executed (gGTO=0)`                         | Not homed, force control active, or the write re-activated the gripper after a fault | `home()`, set `FC_MODE` = 0, or re-send the move |
+| `home timeout`                                         | Mechanical jam, backoff distance exceeds workspace, or a very low `rSP` | Manually back the fingers off and retry |
+| `moveTo` to the current position returns at once       | The fingers are already there (`AtTarget` right away)              | Expected |
+| Tactile tip stays `NotDetected`                        | `CFG_SENSOR_TYPE` ≠ 2, or sensor cable                             | Write `0x018A = 2`, then `DEV_CMD 0x02` (no reboot needed) |
 | Tactile tip stays `Waiting`                            | Sensor still zeroing after power-up (≈ 4.5 s) or data stream broken | Wait; if it persists, check the sensor |
 | `tactile command rejected`                             | Not tactile, invalid values, or force control uses the sensor      | Stop force control (`FC_MODE = 0`) before zeroing |
 | `readFastState()` → `modbus exception code 2`          | Firmware older than protocol v1.15.0                               | Use `readState()` + `readTactile()` |
@@ -705,8 +886,9 @@ over response deadlines, stale-RX flushing, and inter-frame timing,
 which matters for high-rate polling from the ROS2 driver.
 
 **Q. Can I tune PID gains at runtime?**
-A. Yes — write `0x0190..0x0196`, then issue the appropriate developer
-command at `0x0180` to persist. See §7.4.
+A. Yes — write `0x0190..0x0196`, then `DEV_CMD 0x04 SAVE_PID` (applies
+and saves to flash; `0x05` LOAD_PID and `0x06` RESTORE_PID_DEFAULT undo
+it). See §7.4 and the Protocol Manual §5.
 
 **Q. How do I detect that an object has been grasped (not just that the
 target was reached)?**
@@ -716,10 +898,12 @@ means an object stopped the fingers before reaching the target;
 obstruction.
 
 **Q. What's the maximum command rate?**
-A. Each Modbus transaction at 115 200 baud takes 3–5 ms wall time. A
-typical control loop of `moveTo` + `readState` therefore runs at
-≈ 100 Hz. For tighter control loops, increase the baud rate (write
-register `0x0183`/`0x0184`).
+A. Each Modbus transaction at 115 200 baud takes 3–5 ms wall time,
+mostly line time and USB-adapter latency (the firmware itself answers
+≈ 0.76 ms after a request). A typical control loop of `moveTo` +
+`readState` therefore runs at ≈ 100 Hz. For tighter control loops,
+raise the baud rate (§4: `0x0183`/`0x0184`, `SAVE_CONFIG`, `REBOOT`) and
+poll the fast block (`readFastState()`).
 
 ---
 
@@ -745,9 +929,9 @@ Add the declaration in `include/aidin/gripper.hpp`. No CMake changes
 needed.
 
 To add a new register group, extend `include/aidin/registers.hpp` with
-new `constexpr` constants — keep firmware-side (`aidin_modbus.h`) and
-SDK-side definitions in sync.
+new `constexpr` constants — keep them in sync with the Protocol Manual and
+with `python/aidin_gripper/registers.py`.
 
 ---
 
-*Manual revision: 1.0 — matches SDK [`v1.0.0`](CMakeLists.txt).*
+*Manual revision: 1.2 — matches SDK [`v1.2.0`](CMakeLists.txt) and firmware Spec v1.25.1.*

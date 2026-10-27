@@ -1,16 +1,21 @@
-"""Example 5: Inspect faults and recover with emergency release.
+"""Example 5: Inspect faults, recover, and use the emergency release.
 
 Covers:
-  - `fault` (gFLT, transient) vs `latched_fault` (gFLTO, sticky) fields
-  - `emergency_release()` to free a stuck object
-  - Recovery: emergency_release() drops rACT, so call `activate()` again
-    afterwards to resume normal move_to() operation
+  - `fault` (gFLT, live) vs `latched_fault` (gFLTO, history) fields
+  - Fault recovery (firmware >= v1.23): a fault switches the gripper off
+    (gACT = 0, rACT cleared). Remove the cause, then `activate()` - no
+    FAULT_CLEAR needed - and re-send your command. FAULT_CLEAR only clears
+    the gFLTO history.
+  - `emergency_release()` to free a stuck object: drives the fingers fully
+    open (or closed) and ends force control. The gripper stays active, so
+    the next move_to() works normally.
 
 Usage:
     python 05_fault_and_emergency_release.py /dev/ttyUSB0 [open|close]
     python 05_fault_and_emergency_release.py COM3 close
 """
 import sys
+import time
 
 from aidin_gripper import Gripper
 
@@ -30,23 +35,26 @@ def main() -> int:
             s = g.read_state()
             print(f"Before: {s}")
             if s.fault:
-                print(f"  active fault code: {s.fault}")
+                print(f"  live fault gFLT = {s.fault} - remove the cause first")
             if s.latched_fault:
-                print(f"  latched fault code: {s.latched_fault} "
-                      "(clearing it needs the factory DEV_CMD_FAULT_CLEAR "
-                      "command - see aidin_gripper.registers)")
+                print(f"  fault history gFLTO = {s.latched_fault} (kept until "
+                      "g.write_register(reg.DEV_CMD, reg.DEV_CMD_FAULT_CLEAR); "
+                      "not needed to re-activate)")
+
+            # Inactive (never activated, deactivated, or switched off by a
+            # fault): activate() is the recovery step. The emergency release
+            # is skipped on the write that re-activates after a fault, so
+            # activate first and send the release afterwards.
+            if not s.activated:
+                print("Activating ...")
+                g.activate()          # raises with gFLT/gFLTO if the cause is still present
 
             print(f"Emergency release ({direction}) ...")
             g.emergency_release(close_direction=(direction == "close"))
+            time.sleep(1.0)           # the call does not wait for the fingers
             print(f"  -> {g.read_state()}")
 
-            # emergency_release() writes rATR (and drops rACT), so the
-            # gripper won't accept move_to() again until we re-activate.
-            print("Re-activating to clear the release latch ...")
-            g.activate()
-            print(f"  -> {g.read_state()}")
-
-            print("Done.")
+            print("Done - the gripper is still active; move_to() works as usual.")
     except Exception as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 1

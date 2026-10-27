@@ -1,4 +1,5 @@
-"""Example 4: Read gripper status once, or watch it change over time.
+"""Example 4: Print firmware version + serial number, then read the gripper
+status once, or watch it change over time.
 
 Usage:
     python 04_get_status.py /dev/ttyUSB0            # read once and exit
@@ -32,6 +33,9 @@ def main() -> int:
     try:
         with Gripper() as g:
             g.connect(port)
+
+            serial = g.read_serial_number()
+            print(f"Firmware {g.read_firmware_info()}, serial {serial or '(not recorded)'}")
 
             if not watch:
                 print(g.read_state())

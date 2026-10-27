@@ -4,6 +4,7 @@
 #include <array>
 #include <cstdint>
 #include <ostream>
+#include <string>
 
 namespace aidin {
 
@@ -15,9 +16,9 @@ enum class GripperStage : uint8_t {
 
 enum class ObjectState : uint8_t {
     Moving        = 0,
-    OpenContact   = 1,  // object detected while opening
-    ClosedContact = 2,  // object detected while closing
-    AtTarget      = 3,
+    OpenContact   = 1,  // reserved — current firmware never reports contact via gOBJ
+    ClosedContact = 2,  // reserved — current firmware never reports contact via gOBJ
+    AtTarget      = 3,  // move finished (also when an object stopped the fingers)
 };
 
 struct GripperState {
@@ -104,6 +105,50 @@ struct FastState {
     TactileTip   left;             // tip 2
 };
 
+// Firmware version + build info (0x01C4..0x01CB, firmware >= v1.25.0).
+// The version is the protocol Spec version the firmware implements. On
+// firmware <= v1.24 every field is 0: hasVersion() is false and toString()
+// reads "<= 1.24 (no version registers)".
+struct FirmwareInfo {
+    uint16_t major     = 0;
+    uint16_t minor     = 0;
+    uint16_t patch     = 0;
+    uint32_t gitHash   = 0;      // build commit, first 8 hex digits (0 when noInfo)
+    bool     dirty     = false;  // built with uncommitted changes
+    bool     noInfo    = false;  // built without git info: gitHash = 0
+    uint16_t buildYymm = 0;      // build year+month, decimal: 2610 = 2026-10 (0 = unknown)
+    uint16_t buildDdhh = 0;      // build day+hour, decimal: 2714 = day 27, 14 h (build PC local time)
+
+    bool hasVersion() const { return major != 0 || minor != 0 || patch != 0; }
+
+    // "1.25.1"
+    std::string version() const {
+        return std::to_string(major) + "." + std::to_string(minor) + "." + std::to_string(patch);
+    }
+
+    // "1.25.1 (1a2b3c4d)", "1.25.1 (1a2b3c4d-dirty)", "1.25.1 (no git info)",
+    // or "<= 1.24 (no version registers)"
+    std::string toString() const {
+        if (!hasVersion()) return "<= 1.24 (no version registers)";
+        if (noInfo)        return version() + " (no git info)";
+        static const char* digits = "0123456789abcdef";
+        std::string hash(8, '0');
+        for (int i = 0; i < 8; ++i) {
+            hash[static_cast<size_t>(7 - i)] = digits[(gitHash >> (4 * i)) & 0xFu];
+        }
+        return version() + " (" + hash + (dirty ? "-dirty)" : ")");
+    }
+
+    // "2026-10-27 14h" (build PC local time), "" when not recorded
+    std::string buildTime() const {
+        if (buildYymm == 0) return "";
+        const auto pad2 = [](unsigned v) { return (v < 10 ? "0" : "") + std::to_string(v); };
+        std::string s = "20" + pad2(buildYymm / 100u) + "-" + pad2(buildYymm % 100u);
+        if (buildDdhh != 0) s += "-" + pad2(buildDdhh / 100u) + " " + pad2(buildDdhh % 100u) + "h";
+        return s;
+    }
+};
+
 inline const char* toString(GripperStage s) {
     switch (s) {
         case GripperStage::Reset:      return "Reset";
@@ -154,6 +199,10 @@ inline std::ostream& operator<<(std::ostream& os, const TactileTip& t) {
     if (t.saturated) os << " SAT";
     os << "}";
     return os;
+}
+
+inline std::ostream& operator<<(std::ostream& os, const FirmwareInfo& f) {
+    return os << f.toString();
 }
 
 inline std::ostream& operator<<(std::ostream& os, const FastState& s) {

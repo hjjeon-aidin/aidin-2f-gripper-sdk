@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
 project(aidin_gripper_sdk
-        VERSION 1.1.0
+        VERSION 1.2.0
         DESCRIPTION "C++ SDK for Aidin BLDC Gripper (DH-Robotics Modbus RTU, self-contained framing)"
         LANGUAGES CXX)
 
@@ -24,7 +24,8 @@ target_include_directories(aidin_gripper
 )
 
 if(MSVC)
-    target_compile_options(aidin_gripper PRIVATE /W4 /permissive-)
+    # Sources are UTF-8: /utf-8 avoids C4819 on non-UTF-8 code pages (e.g. 949, Korean Windows)
+    target_compile_options(aidin_gripper PRIVATE /W4 /permissive- /utf-8)
 else()
     target_compile_options(aidin_gripper PRIVATE -Wall -Wextra -Wpedantic)
 endif()
@@ -42,6 +43,9 @@ if(AIDIN_BUILD_EXAMPLES)
         05_fast_poll)
         add_executable(${ex} examples/${ex}.cpp)
         target_link_libraries(${ex} PRIVATE aidin_gripper)
+        if(MSVC)
+            target_compile_options(${ex} PRIVATE /utf-8)
+        endif()
     endforeach()
 endif()
 

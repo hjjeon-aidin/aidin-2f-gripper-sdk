@@ -64,7 +64,7 @@ int main(int argc, char** argv) {
         const uint16_t sensor = g.readRegister(aidin::reg::CFG_SENSOR_TYPE);
         if (sensor != aidin::reg::SENSOR_TACTILE) {
             std::cerr << "CFG_SENSOR_TYPE = " << sensor << ", not tactile (2). Write 2 to 0x018A, "
-                         "DEV_CMD 0x02 SAVE_CONFIG, then power-cycle.\n";
+                         "then DEV_CMD 0x02 SAVE_CONFIG (applies at once, no reboot).\n";
             return 1;
         }
 

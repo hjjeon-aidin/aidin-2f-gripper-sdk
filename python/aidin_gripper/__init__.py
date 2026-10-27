@@ -10,6 +10,7 @@
 from .gripper import Gripper
 from .types import (
     FastState,
+    FirmwareInfo,
     GripperError,
     GripperStage,
     GripperState,
@@ -27,10 +28,11 @@ __all__ = [
     "GripperStage",
     "ObjectState",
     "FastState",
+    "FirmwareInfo",
     "TactileLink",
     "TactileRaw",
     "TactileTip",
     "registers",
 ]
 
-__version__ = "1.0.0"
+__version__ = "1.2.0"

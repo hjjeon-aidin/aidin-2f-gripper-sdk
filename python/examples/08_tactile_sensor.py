@@ -8,7 +8,7 @@ set to tactile (one-time setup, --enable below).
 Usage:
     python 08_tactile_sensor.py /dev/ttyUSB0             # stream both tips @ 20 Hz
     python 08_tactile_sensor.py /dev/ttyUSB0 --zero      # sensor no-load zero first
-    python 08_tactile_sensor.py /dev/ttyUSB0 --enable    # set CFG_SENSOR_TYPE=2, save, then power-cycle
+    python 08_tactile_sensor.py /dev/ttyUSB0 --enable    # set CFG_SENSOR_TYPE=2 and save (applies at once)
     python 08_tactile_sensor.py COM3
 """
 import signal
@@ -30,11 +30,11 @@ def _on_signal(_signum, _frame):
 def enable_tactile(g: Gripper) -> int:
     g.write_register(reg.CFG_SENSOR_TYPE, reg.SENSOR_TACTILE)
     g.write_register(reg.DEV_CMD, reg.DEV_CMD_SAVE_CONFIG)
-    time.sleep(0.2)                          # flash write stalls Modbus ~10 ms
+    time.sleep(0.2)                          # flash write blocks Modbus ~25 ms
     if g.read_register(reg.DEV_STATUS) != reg.DEV_STATUS_OK:
         print("SAVE_CONFIG failed", file=sys.stderr)
         return 1
-    print("Sensor type saved as tactile. Power-cycle the gripper, then run again.")
+    print("Sensor type saved as tactile and applied. Run again without --enable.")
     return 0
 
 
@@ -68,7 +68,7 @@ def main() -> int:
             sensor = g.read_register(reg.CFG_SENSOR_TYPE)
             if sensor != reg.SENSOR_TACTILE:
                 print(f"CFG_SENSOR_TYPE = {sensor}, not tactile (2). "
-                      f"Run with --enable once, then power-cycle.", file=sys.stderr)
+                      f"Run with --enable once.", file=sys.stderr)
                 return 1
 
             wait_live(g)

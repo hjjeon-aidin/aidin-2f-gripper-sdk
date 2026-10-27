@@ -1,19 +1,21 @@
 // aidin_gripper_driver - ROS2 driver node for the AIDIN BLDC gripper.
 //
 // Wraps the aidin::Gripper C++ SDK (self-contained Modbus RTU framing,
-// no external Modbus library) and exposes:
-//   * /aidin_gripper/state             (aidin_gripper_msgs/msg/GripperState)
-//   * /aidin_gripper/activate          (std_srvs/srv/Trigger)
-//   * /aidin_gripper/deactivate        (std_srvs/srv/Trigger)
-//   * /aidin_gripper/home              (std_srvs/srv/Trigger)
-//   * /aidin_gripper/full_init         (std_srvs/srv/Trigger)
-//   * /aidin_gripper/stop              (std_srvs/srv/Trigger)
-//   * /aidin_gripper/fault_clear       (std_srvs/srv/Trigger)
-//   * /aidin_gripper/move_to           (aidin_gripper_msgs/srv/MoveTo)
-//   * /aidin_gripper/emergency_release (aidin_gripper_msgs/srv/EmergencyRelease)
-//   * /aidin_gripper/dev_cmd           (aidin_gripper_msgs/srv/DevCmd) — see below
-//   * /aidin_gripper/tactile           (aidin_gripper_msgs/msg/TactileState) — publish_tactile:=true
-//   * /aidin_gripper/tactile_zero      (std_srvs/srv/Trigger)
+// no external Modbus library) and exposes, under the node name
+// (/aidin_gripper_driver/... by default):
+//   * ~/state             (aidin_gripper_msgs/msg/GripperState)
+//   * ~/activate          (std_srvs/srv/Trigger) — also the fault recovery step
+//   * ~/deactivate        (std_srvs/srv/Trigger)
+//   * ~/home              (std_srvs/srv/Trigger)
+//   * ~/full_init         (std_srvs/srv/Trigger)
+//   * ~/stop              (std_srvs/srv/Trigger)
+//   * ~/fault_clear       (std_srvs/srv/Trigger) — clears the gFLTO history only
+//   * ~/get_device_info   (std_srvs/srv/Trigger) — firmware version + serial number
+//   * ~/move_to           (aidin_gripper_msgs/srv/MoveTo)
+//   * ~/emergency_release (aidin_gripper_msgs/srv/EmergencyRelease)
+//   * ~/dev_cmd           (aidin_gripper_msgs/srv/DevCmd) — see below
+//   * ~/tactile           (aidin_gripper_msgs/msg/TactileState) — publish_tactile:=true
+//   * ~/tactile_zero      (std_srvs/srv/Trigger)
 #include "aidin/gripper.hpp"
 #include "aidin/registers.hpp"
 
@@ -34,8 +36,8 @@
 
 // Set to 0 (or build with -DAIDIN_ENABLE_DEV_CMD=OFF, see CMakeLists) to
 // compile the developer-command service (~/dev_cmd) out of the node
-// entirely. ~/fault_clear stays available — clearing the latched fault is a
-// normal operational action, not a factory one.
+// entirely. ~/fault_clear stays available — clearing the fault history
+// (gFLTO) is a normal operational action, not a factory one.
 #ifndef AIDIN_ENABLE_DEV_CMD
 #define AIDIN_ENABLE_DEV_CMD 1
 #endif
@@ -68,11 +70,17 @@ public:
                              parity_.empty() ? 'N' : parity_[0],
                              slave_id_);
             RCLCPP_INFO(get_logger(),
-                "Connected to AIDIN gripper on %s @ %d %c81 (slave %d)",
-                port_.c_str(), baudrate_, parity_[0], slave_id_);
+                "Connected to AIDIN gripper on %s @ %d 8%c1 (slave %d)",
+                port_.c_str(), baudrate_, parity_.empty() ? 'N' : parity_[0], slave_id_);
         } catch (const std::exception& e) {
             RCLCPP_FATAL(get_logger(), "Connect failed: %s", e.what());
             throw;
+        }
+        // Firmware version + serial number, for the log (also ~/get_device_info).
+        try {
+            RCLCPP_INFO(get_logger(), "Device: %s", deviceInfoText().c_str());
+        } catch (const std::exception& e) {
+            RCLCPP_WARN(get_logger(), "Device info read failed: %s", e.what());
         }
 
         // Best-effort startup: activate + (optionally) home.
@@ -103,7 +111,7 @@ public:
                 const uint16_t sensor = gripper_.readRegister(aidin::reg::CFG_SENSOR_TYPE);
                 if (sensor != aidin::reg::SENSOR_TACTILE) {
                     RCLCPP_WARN(get_logger(),
-                        "publish_tactile is set but CFG_SENSOR_TYPE=%u (tactile is 2) — "
+                        "publish_tactile is set but CFG_SENSOR_TYPE=%u (tactile is 2) - "
                         "~/tactile will report LINK_NOT_DETECTED", static_cast<unsigned>(sensor));
                 }
             } catch (const std::exception& e) {
@@ -128,6 +136,9 @@ public:
                       std::placeholders::_1, std::placeholders::_2));
         srv_fault_clear_ = create_service<TriggerSrv>("~/fault_clear",
             std::bind(&AidinGripperNode::onFaultClear, this,
+                      std::placeholders::_1, std::placeholders::_2));
+        srv_device_info_ = create_service<TriggerSrv>("~/get_device_info",
+            std::bind(&AidinGripperNode::onGetDeviceInfo, this,
                       std::placeholders::_1, std::placeholders::_2));
         srv_move_       = create_service<MoveToSrv>("~/move_to",
             std::bind(&AidinGripperNode::onMoveTo, this,
@@ -270,6 +281,33 @@ private:
         runCommand(*req, *resp, "tactile_zero", [&]{ gripper_.tactileZero(); });
     }
 
+    // "firmware 1.25.1 (1a2b3c4d), built 2026-10-27 14h, serial BLDC2FV1-2610-0001".
+    // Callers hold io_mutex_ (or run before the executor starts).
+    std::string deviceInfoText() {
+        const aidin::FirmwareInfo fw = gripper_.readFirmwareInfo();
+        const std::string serial     = gripper_.readSerialNumber();
+        std::string text = "firmware " + fw.toString();
+        const std::string built = fw.buildTime();
+        if (!built.empty()) text += ", built " + built;
+        text += ", serial " + (serial.empty() ? std::string("(not recorded)") : serial);
+        return text;
+    }
+
+    void onGetDeviceInfo(const std::shared_ptr<TriggerSrv::Request> /*req*/,
+                         std::shared_ptr<TriggerSrv::Response> resp) {
+        std::lock_guard<std::mutex> lk(io_mutex_);
+        try {
+            resp->message = deviceInfoText();
+            resp->success = true;
+        } catch (const std::exception& e) {
+            resp->success = false;
+            resp->message = std::string("get_device_info failed: ") + e.what();
+            RCLCPP_ERROR(get_logger(), "%s", resp->message.c_str());
+        }
+    }
+
+    // Clears the fault history gFLTO only. Re-activating after a fault needs
+    // just ~/activate (firmware >= v1.23).
     void onFaultClear(const std::shared_ptr<TriggerSrv::Request> req,
                       std::shared_ptr<TriggerSrv::Response> resp) {
         runCommand(*req, *resp, "fault_clear", [&]{
@@ -339,7 +377,9 @@ private:
         try {
             gripper_.emergencyRelease(req->close_direction);
             resp->success = true;
-            resp->message = "emergency_release latched (call activate to clear)";
+            resp->message = std::string("emergency_release sent (") +
+                            (req->close_direction ? "close" : "open") +
+                            "); the gripper stays active";
         } catch (const std::exception& e) {
             resp->success = false;
             resp->message = std::string("emergency_release failed: ") + e.what();
@@ -364,6 +404,7 @@ private:
     rclcpp::Service<TriggerSrv>::SharedPtr             srv_full_init_;
     rclcpp::Service<TriggerSrv>::SharedPtr             srv_stop_;
     rclcpp::Service<TriggerSrv>::SharedPtr             srv_fault_clear_;
+    rclcpp::Service<TriggerSrv>::SharedPtr             srv_device_info_;
     rclcpp::Service<MoveToSrv>::SharedPtr              srv_move_;
     rclcpp::Service<EmergencyReleaseSrv>::SharedPtr    srv_release_;
     rclcpp::Service<TriggerSrv>::SharedPtr             srv_tactile_zero_;

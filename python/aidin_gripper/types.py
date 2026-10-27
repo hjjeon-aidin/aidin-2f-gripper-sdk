@@ -13,9 +13,9 @@ class GripperStage(IntEnum):
 
 class ObjectState(IntEnum):
     MOVING         = 0
-    OPEN_CONTACT   = 1   # object detected while opening
-    CLOSED_CONTACT = 2   # object detected while closing
-    AT_TARGET      = 3
+    OPEN_CONTACT   = 1   # reserved — current firmware never reports contact via gOBJ
+    CLOSED_CONTACT = 2   # reserved — current firmware never reports contact via gOBJ
+    AT_TARGET      = 3   # move finished (also when an object stopped the fingers)
 
 
 @dataclass
@@ -133,6 +133,53 @@ class FastState:
         )
 
 
+@dataclass
+class FirmwareInfo:
+    """Firmware version + build info (0x01C4..0x01CB, firmware >= v1.25.0).
+
+    The version is the protocol Spec version the firmware implements. On
+    firmware <= v1.24 every field is 0: ``has_version`` is False and
+    ``str(info)`` reads "<= 1.24 (no version registers)".
+    """
+    major:      int  = 0
+    minor:      int  = 0
+    patch:      int  = 0
+    git_hash:   int  = 0       # build commit, first 8 hex digits (0 when no_info)
+    dirty:      bool = False   # built with uncommitted changes
+    no_info:    bool = False   # built without git info: git_hash = 0
+    build_yymm: int  = 0       # build year+month, decimal: 2610 = 2026-10 (0 = unknown)
+    build_ddhh: int  = 0       # build day+hour, decimal: 2714 = day 27, 14 h (build PC local time)
+
+    @property
+    def has_version(self) -> bool:
+        return bool(self.major or self.minor or self.patch)
+
+    @property
+    def version(self) -> str:
+        """``"1.25.1"``."""
+        return f"{self.major}.{self.minor}.{self.patch}"
+
+    @property
+    def build_time(self) -> str:
+        """``"2026-10-27 14h"`` (build PC local time), ``""`` when not recorded."""
+        if not self.build_yymm:
+            return ""
+        s = f"20{self.build_yymm // 100:02d}-{self.build_yymm % 100:02d}"
+        if self.build_ddhh:
+            s += f"-{self.build_ddhh // 100:02d} {self.build_ddhh % 100:02d}h"
+        return s
+
+    def __str__(self) -> str:
+        """``"1.25.1 (1a2b3c4d)"``, ``"1.25.1 (1a2b3c4d-dirty)"``, ``"1.25.1 (no git info)"``."""
+        if not self.has_version:
+            return "<= 1.24 (no version registers)"
+        if self.no_info:
+            return f"{self.version} (no git info)"
+        return f"{self.version} ({self.git_hash:08x}{'-dirty' if self.dirty else ''})"
+
+
 class GripperError(RuntimeError):
-    """Raised on Modbus failure or command timeout."""
+    """Raised on Modbus failure, command timeout, or when a blocking command
+    stops because the gripper is inactive (gACT=0) or faulted (the message
+    names gFLT/gFLTO)."""
     pass

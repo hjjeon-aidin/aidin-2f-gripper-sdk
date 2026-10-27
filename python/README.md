@@ -1,9 +1,10 @@
 # AIDIN Gripper — Python SDK
 
-Pure-Python SDK for the AIDIN BLDC gripper (DH-Robotics Modbus RTU). Runs
+Python SDK for the AIDIN BLDC gripper (DH-Robotics Modbus RTU), built on
+[`pymodbus`](https://pypi.org/project/pymodbus/) 3.x and `pyserial`. Runs
 on Ubuntu and Windows with **one `pip install` step**. API surface is
 deliberately kept close to the [C++ SDK](../cpp/) so the two are easy to
-switch between.
+switch between. Firmware compatibility: [../README.md](../README.md#compatibility--호환성).
 
 ```python
 from aidin_gripper import Gripper
@@ -21,8 +22,8 @@ with Gripper() as g:
 
 | | Minimum |
 |---|---|
-| Python | 3.8+ |
-| pymodbus | 3.0+ |
+| Python | 3.8+ (pip picks the newest pymodbus 3.x your Python supports) |
+| pymodbus | 3.1 – 3.x — both keyword generations work: `slave=` (3.1 – 3.9) and `device_id=` (3.10+); the SDK detects which one is installed |
 | pyserial | 3.5+ |
 | Hardware | USB ↔ RS485 adapter (FTDI / CH340 / CP210x) |
 
@@ -56,7 +57,7 @@ USB-RS485 adapters need their vendor driver (FTDI / CH340 / CP210x).
 ### Just want the dependencies?
 
 ```bash
-pip install "pymodbus>=3.0,<4.0" pyserial
+pip install "pymodbus>=3.1,<4.0" pyserial
 ```
 
 ## Run the examples
@@ -66,8 +67,8 @@ pip install "pymodbus>=3.0,<4.0" pyserial
 | `examples/01_activate_and_home.py` | Minimal startup sequence: activate + home |
 | `examples/02_open_and_close.py` | One close + one open move (assumes already activated/homed) |
 | `examples/03_open_close_loop.py` | Repeated open/close cycles with blocking moves and SIGINT (CTRL+C) handling |
-| `examples/04_get_status.py` | Read status once, or `--watch` to poll @ 100 ms and print on change |
-| `examples/05_fault_and_emergency_release.py` | Inspect `fault`/`latched_fault`, call `emergency_release()`, recover with `activate()` |
+| `examples/04_get_status.py` | Print firmware version + serial number, then read status once, or `--watch` to poll @ 100 ms and print on change |
+| `examples/05_fault_and_emergency_release.py` | Inspect `fault`/`latched_fault`, recover with `activate()`, then `emergency_release()` (the gripper stays active) |
 | `examples/06_full_quickstart_demo.py` | End-to-end: connect → activate → home → close → open → status |
 | `examples/07_multi_gripper_two_slaves.py` | Two grippers, one RS485 bus, two slave IDs (shared serial connection) |
 | `examples/08_tactile_sensor.py` | Fingertip tactile sensors: link state, `--zero`, stream contact point + force; `--enable` sets the sensor type once |
@@ -97,18 +98,21 @@ wire pair as long as each has a distinct Modbus slave address.
    the bus (two units left at the factory default of `1` would both
    answer at once and collide):
    ```python
+   import time
    from aidin_gripper import Gripper, registers as reg
 
    with Gripper() as g:
        g.connect("/dev/ttyUSB0")             # default slave_id=1
+       g.deactivate()                        # REBOOT is refused while active
        g.write_register(reg.CFG_MB_ADDR, 2)  # reassign this unit to slave 2
-       # Persist to flash: write the SAVE_CONFIG developer command to
-       # reg.DEV_CMD. The command code is factory-tool territory - see
-       # "Changing baud rate / slave ID" in ../cpp/MANUAL.md and the
-       # firmware protocol docs for the exact value.
+       g.write_register(reg.DEV_CMD, reg.DEV_CMD_SAVE_CONFIG)   # persist to flash
+       time.sleep(0.1)                                          # flash write ~25 ms
+       assert g.read_register(reg.DEV_STATUS) == reg.DEV_STATUS_OK
+       g.write_register(reg.DEV_CMD, reg.DEV_CMD_REBOOT)        # firmware >= v1.20
    ```
-   After the firmware saves and restarts its UART, reconnect at the new
-   `slave_id`.
+   The new address applies at the next boot — `REBOOT` above, or a power
+   cycle on firmware ≤ v1.19. Reconnect at the new `slave_id` about a
+   second later.
 
 2. **Wire both units onto the same bus**, then just `connect()` two
    `Gripper` instances to the same port with different `slave_id`:
@@ -128,7 +132,8 @@ wire pair as long as each has a distinct Modbus slave address.
    given port — those are properties of the physical link, not of one
    device. Each Modbus transaction (one register read or write) is
    serialized with an internal lock, so it's safe to drive both grippers
-   from separate threads too. See
+   from separate threads too (one `Gripper` instance per thread — a single
+   instance's multi-step commands are not meant to run concurrently). See
    [`examples/07_multi_gripper_two_slaves.py`](examples/07_multi_gripper_two_slaves.py).
 
 ## API at a glance
@@ -138,16 +143,19 @@ wire pair as long as each has a distinct Modbus slave address.
 | `connect(port, baudrate=115200, parity='N', slave_id=1)` | Open serial link (shared automatically with other `Gripper`s already on the same port) |
 | `disconnect()`                                            | Close link (only actually closes the port once every sharer has disconnected) |
 | `slave_id` (property)                                     | This instance's Modbus slave address |
-| `activate(timeout_s=3.0)`                                 | rACT=1, wait for ACTIVE |
-| `deactivate()`                                            | rACT=0 |
-| `home(timeout_s=15.0)`                                    | Rising-edge homing, wait for gHOM=1 |
+| `activate(timeout_s=3.0)`                                 | rACT=1, wait for ACTIVE. Also the fault recovery step; fails fast (naming gFLT/gFLTO) when gACT falls back to 0 |
+| `deactivate()`                                            | rACT=0 (ends homing and force control, fw ≥ v1.25.1) |
+| `stop()`                                                  | Stop an in-flight motion (rGTO=0); stays active and holding |
+| `home(timeout_s=15.0)`                                    | Rising-edge homing, wait for gHOM=1 (homing runs at 100 % current, fw ≥ v1.25.1) |
 | `full_init(timeout_s=30.0)`                               | Full initialization (`ACTION=0xA5`, protocol v1.12.0): activate + stroke calibration — full stroke sweep ×2, stroke flash-saved (read at `0x018B`) |
 | `set_traj_limits(max_vel, max_acc)`                       | Trajectory limits (protocol v1.11.0, RAM only): vel 1..150 rad/s, acc 1..800 rad/s² — applied via `DEV_CMD 0x0E` |
-| `move_to(position, speed=128, force=128, blocking=False, timeout_s=5.0)` | Position 0=open … 255=close |
-| `emergency_release(close_direction=False)`                | Latched release |
+| `move_to(position, speed=128, force=128, blocking=False, timeout_s=5.0)` | Position 0=open … 255=close; force = current limit (0 = no force). Re-sending the same position pulses rGTO (v1.9.1 rule). Blocking: raises if the move was not executed (gGTO=0) |
+| `emergency_release(close_direction=False)`                | Emergency auto-release: `rACT\|rATR` pulse, fingers fully open/closed, force control ends; the gripper stays active (no latch) |
 | `read_state() -> GripperState`                            | Full status snapshot |
 | `is_at_target()` / `has_fault()`                          | Convenience predicates |
 | `read_fast_state() -> FastState`                          | Fast-poll block `0x02C0` (fw ≥ v1.15.0): status, position, current, fault + both tips' tactile (8-bit) in **one** read |
+| `read_serial_number() -> str`                             | `"BLDC2FV1-2610-0001"` (fw ≥ v1.24.0); `""` = not recorded; fw ≤ v1.23: `"YYMM-NNNN"` |
+| `read_firmware_info() -> FirmwareInfo`                    | Firmware version + build info (fw ≥ v1.25.0; older reads 0.0.0) |
 | `read_tactile() -> (TactileTip, TactileTip)`              | Both fingertips' tactile resultant `(right, left)` from `0x0220~` (0.01 mm / 0.01 N) |
 | `read_tactile_raw(tip) -> TactileRaw`                     | One tip's raw 69-channel stream (bring-up); `tip` = `registers.TACT_TIP_RIGHT` / `TACT_TIP_LEFT` |
 | `tactile_zero(tips=TACT_TIP_BOTH)`                        | Sensor no-load zero (fw ≥ v1.17.0) — pads untouched; tip reads `WAITING` ~1.25 s, then `LIVE` |
@@ -157,7 +165,59 @@ wire pair as long as each has a distinct Modbus slave address.
 
 `Gripper` is a context manager — `with Gripper() as g:` auto-closes the port.
 
-All failures raise `aidin_gripper.GripperError` (a `RuntimeError` subclass).
+All failures raise `aidin_gripper.GripperError` (a `RuntimeError` subclass)
+— Modbus errors, timeouts (whether the installed pymodbus returns or raises
+them), and blocking calls that stop because the gripper reports `gACT` = 0
+or a fault; that message names `gFLT` (live fault) and `gFLTO` (history).
+
+## Fault recovery
+
+Firmware ≥ v1.23 switches the gripper off on a fault (`gACT` = 0, `rACT`
+cleared). Every command writes `rACT` = 1, so the next command
+re-activates it — but the firmware skips the move/home/release of that
+first re-activating write. Recover like this:
+
+```python
+from aidin_gripper import Gripper, GripperError
+
+try:
+    g.move_to(255, blocking=True)
+except GripperError as e:
+    print(e)          # "... stopped: gripper not active or faulted (gACT=0, gFLT=6 (under-voltage), ...)"
+    # 1. remove the cause (supply, load, temperature), then
+    g.activate()      # 2. re-activate - raises again, naming gFLT/gFLTO, if the cause is still there
+    g.move_to(255, blocking=True)   # 3. re-send the command
+```
+
+`FAULT_CLEAR` (`g.write_register(reg.DEV_CMD, reg.DEV_CMD_FAULT_CLEAR)`)
+is not needed for this — it only clears the `gFLTO` history. Details:
+[../README.md](../README.md#fault-deactivation--폴트-시-비활성화).
+
+## Device information
+
+```python
+fw = g.read_firmware_info()       # one read of 0x01C4..0x01CB
+print(fw)                         # "1.25.1 (1a2b3c4d)", "1.25.1 (1a2b3c4d-dirty)",
+                                  # or "<= 1.24 (no version registers)"
+print(fw.has_version, fw.major, fw.minor, fw.patch, f"{fw.git_hash:08x}", fw.dirty, fw.build_time)
+
+sn = g.read_serial_number()       # "BLDC2FV1-2610-0001"; "" = not recorded
+print(sn or "(not recorded)")
+```
+
+```python
+@dataclass
+class FirmwareInfo:
+    major, minor, patch: int     # = protocol Spec version; 0.0.0 on firmware <= v1.24
+    git_hash:   int              # build commit, first 8 hex digits (0 when no_info)
+    dirty:      bool             # built with uncommitted changes
+    no_info:    bool             # built without git info
+    build_yymm: int              # 2610 = 2026-10 (0 = unknown)
+    build_ddhh: int              # 2714 = day 27, 14 h (build PC local time)
+    has_version   # property: False on firmware <= v1.24
+    version       # property: "1.25.1"
+    build_time    # property: "2026-10-27 14h", "" when not recorded
+```
 
 ## `GripperState` dataclass
 
@@ -182,8 +242,8 @@ class GripperState:
 
 Needs firmware protocol ≥ v1.18.0 and `CFG_SENSOR_TYPE = 2` (tactile).
 Set it once with `python examples/08_tactile_sensor.py PORT --enable`
-(writes `0x018A`, `SAVE_CONFIG`), then power-cycle. Tip 1 = **right**
-finger, tip 2 = **left** finger.
+(writes `0x018A`, `SAVE_CONFIG` — applies immediately, no reboot). Tip 1 =
+**right** finger, tip 2 = **left** finger.
 
 ```python
 from aidin_gripper import Gripper, TactileLink
@@ -248,8 +308,11 @@ decoding: [../README.md](../README.md#fast-poll-block--고속-폴링-블록-0x02
 | `g.activate()`                  | `g.activate()`                  |
 | `g.home()`                      | `g.home()`                      |
 | `g.moveTo(255, 200, 128, true)` | `g.move_to(255, 200, 128, blocking=True)` |
+| `g.stop()`                      | `g.stop()`                      |
 | `g.readState()`                 | `g.read_state()`                |
 | `g.isAtTarget()`                | `g.is_at_target()`              |
+| `g.readFirmwareInfo()`          | `g.read_firmware_info()`        |
+| `g.readSerialNumber()`          | `g.read_serial_number()`        |
 | `g.readFastState()`             | `g.read_fast_state()`           |
 | `auto tips = g.readTactile();` (`tips[0]` right) | `right, left = g.read_tactile()` |
 | `g.tactileZero()`               | `g.tactile_zero()`              |
@@ -261,8 +324,10 @@ The same register map, same default arguments, same blocking semantics.
 ## Register map
 
 See [`aidin_gripper/registers.py`](aidin_gripper/registers.py). Mirrors the
-firmware-side definitions in `aidin_modbus.h`. Full protocol details:
-[`../cpp/MANUAL.md`](../cpp/MANUAL.md).
+register map of the Aidin Gripper Modbus RTU Protocol Manual Rev 2.6 (Spec
+v1.25.1), provided with the product. Summary:
+[`../README.md`](../README.md#register-map--레지스터-맵) and
+[`../cpp/MANUAL.md`](../cpp/MANUAL.md#7-protocol-reference-modbus-registers).
 
 ## Troubleshooting
 
@@ -270,10 +335,12 @@ firmware-side definitions in `aidin_modbus.h`. Full protocol details:
 |---|---|
 | `Cannot open serial port '/dev/ttyUSB0'`         | Wrong port or adapter not connected |
 | `Cannot open serial port` (Linux, Permission)    | User not in `dialout` group |
-| `read_holding_registers failed: ... timeout`     | Wrong baud / parity / slave ID; or RS485 A↔B swapped |
-| `activate timeout`                               | Power supply low, or latched fault — read `state.latched_fault` |
-| Gripper ignores `move_to` after one move         | `rATR` still latched after `emergency_release` — call `activate()` again |
-| Tactile tip stays `NOT_DETECTED`                 | `CFG_SENSOR_TYPE` ≠ 2 (run example 08 with `--enable`, power-cycle), or sensor cable |
+| `read_holding_registers failed: ... timeout` / `No response` | Wrong baud or slave ID (the firmware is fixed at 8N1 — keep `parity="N"`); or RS485 A↔B swapped |
+| `activate failed: gACT fell back to 0 (...)`     | A fault is still present — the message names `gFLT` (live) and `gFLTO` (history). Remove the cause (supply, load, temperature), call `activate()` again |
+| `... stopped: gripper not active or faulted (...)` | A fault switched the gripper off, or it was deactivated — remove the cause, `activate()`, re-send the command |
+| `move_to not executed (gGTO=0)`                  | Not homed, force control active (`FC_MODE` ≠ 0), or the call re-activated the gripper after a fault — `home()` / set `FC_MODE` = 0 / re-send the move |
+| `TypeError: ... unexpected keyword argument 'slave'` | A Python SDK older than 1.2.0 with pymodbus ≥ 3.10 — upgrade the SDK |
+| Tactile tip stays `NOT_DETECTED`                 | `CFG_SENSOR_TYPE` ≠ 2 (run example 08 with `--enable`), or sensor cable |
 | Tactile tip stays `WAITING`                      | Sensor still zeroing (~4.5 s after power-up), or its data stream is broken |
 | `tactile command rejected`                       | Sensor type not tactile, values invalid, or force control is using the sensor as feedback |
 | `read_fast_state()` fails with illegal address   | Firmware older than protocol v1.15.0 — use `read_state()` / `read_tactile()` |

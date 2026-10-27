@@ -1,6 +1,7 @@
 // Aidin Gripper SDK - Modbus register map (DH-Robotics RTU compatible)
-// Mirrored from firmware: Aidin_gripper_functions/gripper/Inc/aidin_modbus.h
-//                        Aidin_gripper_functions/modbus/include/mbtask.h
+// Mirrors the register map of the Aidin Gripper Modbus RTU Protocol Manual
+// Rev 2.6 (Spec v1.25.1), provided with the product. Addresses are Modbus wire
+// (PDU) addresses. Keep python/aidin_gripper/registers.py in sync.
 #pragma once
 
 #include <cstdint>
@@ -58,16 +59,45 @@ inline constexpr uint16_t CFG_MB_BAUD_HI = 0x0184;  // baud [31:16]
 inline constexpr uint16_t CFG_CAN_ID     = 0x0185;
 inline constexpr uint16_t CFG_CAN_RATE   = 0x0186;
 inline constexpr uint16_t CFG_DEV_TYPE   = 0x0187;  // 101=Aidin gripper, 102=Apicoo, 103=AFT200, 104=AFT150
-inline constexpr uint16_t CFG_SERIAL_LO  = 0x0188;
-inline constexpr uint16_t CFG_SERIAL_HI  = 0x0189;
-inline constexpr uint16_t CFG_SENSOR_TYPE = 0x018A; // external sensor: 0=none, 1=AFT, 2=tactile
+inline constexpr uint16_t CFG_SERIAL_LO  = 0x0188;  // serial: production number 1..9999 (R/W, SAVE_CONFIG persists; v1.24.0)
+inline constexpr uint16_t CFG_SERIAL_HI  = 0x0189;  // serial: production YYMM as a decimal value, 2610 = 2026-10 (R/W, SAVE_CONFIG persists; v1.24.0)
+inline constexpr uint16_t CFG_SENSOR_TYPE = 0x018A; // external sensor: 0=none, 1=AFT, 2=tactile (SENSOR_*)
 inline constexpr uint16_t CFG_STROKE     = 0x018B;  // measured stroke [rad x 1000] (read-only; STROKE_CAL/full-init updates)
 inline constexpr uint16_t CFG_MB_RESP_DELAY = 0x018C;  // Modbus response delay [us] 0..65535, default 0 (v1.22.0): applied on write, SAVE_CONFIG persists
 
-// CFG_SENSOR_TYPE values. Applied at boot: write -> SAVE_CONFIG -> power cycle.
+// CFG_SENSOR_TYPE values. Write the register, then DEV_CMD_SAVE_CONFIG: the
+// firmware switches the sensor module immediately (DEV_CMD_LOAD_CONFIG
+// re-applies the flash value) — no reboot needed.
 inline constexpr uint16_t SENSOR_NONE    = 0;
 inline constexpr uint16_t SENSOR_AFT     = 1;
 inline constexpr uint16_t SENSOR_TACTILE = 2;
+
+// ---------- Serial number (protocol v1.24.0) ----------
+// Serial number = "<product code>-<YYMM>-<NNNN>", e.g. "BLDC2FV1-2610-0001".
+//   product code: CFG_PRODUCT_CODE..+3, ASCII up to 8 chars, 2 per word, high
+//                 byte first, unused bytes 0x00 (0x01C0 = 'B','L' = 0x424C)
+//   YYMM = CFG_SERIAL_HI, NNNN = CFG_SERIAL_LO. Everything 0 = not recorded.
+// R/W, persisted by DEV_CMD_SAVE_CONFIG. Firmware <= v1.23 has no product code
+// (the words read 0). Gripper::readSerialNumber() assembles the string.
+inline constexpr uint16_t CFG_PRODUCT_CODE       = 0x01C0;  // 0x01C0..0x01C3
+inline constexpr uint16_t CFG_PRODUCT_CODE_WORDS = 4;
+
+// ---------- Firmware version + build info (protocol v1.25.0, read-only) ----------
+// Version = the protocol Spec version the firmware implements. Every word is 0
+// on firmware <= v1.24 (version 0.0.0 = "<= v1.24, no version registers").
+// Gripper::readFirmwareInfo() decodes the block (FW_INFO_WORDS from FW_VER_MAJOR).
+inline constexpr uint16_t FW_VER_MAJOR   = 0x01C4;
+inline constexpr uint16_t FW_VER_MINOR   = 0x01C5;
+inline constexpr uint16_t FW_VER_PATCH   = 0x01C6;
+inline constexpr uint16_t FW_GIT_HASH_HI = 0x01C7;  // build commit hash, first 4 of 8 hex digits
+inline constexpr uint16_t FW_GIT_HASH_LO = 0x01C8;  // build commit hash, last 4 hex digits
+inline constexpr uint16_t FW_BUILD_FLAGS = 0x01C9;  // FW_BUILD_DIRTY | FW_BUILD_NO_INFO
+inline constexpr uint16_t FW_BUILD_YYMM  = 0x01CA;  // build year+month, decimal (2610 = 2026-10)
+inline constexpr uint16_t FW_BUILD_DDHH  = 0x01CB;  // build day+hour, decimal (2714 = day 27, 14 h, build PC local time)
+inline constexpr uint16_t FW_INFO_WORDS  = 8;
+
+inline constexpr uint16_t FW_BUILD_DIRTY   = 0x0001;  // built with uncommitted changes
+inline constexpr uint16_t FW_BUILD_NO_INFO = 0x0002;  // built without git: hash 0 (build time may still be set)
 
 // Trajectory limit registers (protocol v1.11.0). rSP scales against these:
 // vel = TRAJ_MAX_VEL * rSP/255, acc = TRAJ_MAX_ACC * rSP/255.
@@ -78,10 +108,11 @@ inline constexpr uint16_t TRAJ_MAX_ACC = 0x019C;  // uint16 [rad/s^2], valid 1..
 
 // Baud rate (CFG_MB_BAUD_LO/HI, protocol v1.16.0): raw bps split into LO/HI
 // words — NOT a code. Supported: 9600, 19200, 38400, 57600, 115200 (default),
-// 230400, 460800, 921600, 1000000 (>= 460800 needs an adapter + RS485 line that
-// can carry it).
-// Write LO/HI -> DEV_CMD_SAVE_CONFIG -> power cycle (or DEV_CMD_REBOOT on
-// firmware >= v1.20.0, while inactive); the UART switches at the next boot.
+// 230400, 460800, 921600, 1000000, always 8N1 (>= 460800 needs an adapter +
+// RS485 line that can carry it).
+// While inactive (rACT=0): write LO/HI -> DEV_CMD_SAVE_CONFIG -> DEV_STATUS_OK
+// -> DEV_CMD_REBOOT (fw >= v1.20.0; older firmware: power cycle) -> reopen the
+// port at the new baud. The UART switches at the next boot, not on SAVE_CONFIG.
 // SAVE_CONFIG rejects an unsupported value (DEV_STATUS_ERROR, nothing saved).
 // Firmware <= v1.15.x stored the value but always ran at 115200.
 
@@ -89,16 +120,19 @@ inline constexpr uint16_t TRAJ_MAX_ACC = 0x019C;  // uint16 [rad/s^2], valid 1..
 inline constexpr uint16_t DEV_CMD    = 0x0180;
 inline constexpr uint16_t DEV_STATUS = 0x0181;
 
-// DEV_CMD codes (docs/protocol/protocol.md §3 — full list lives there)
-inline constexpr uint16_t DEV_CMD_SAVE_CONFIG  = 0x02;  // persist config regs (0x0182~) to flash
-inline constexpr uint16_t DEV_CMD_FAULT_CLEAR  = 0x07;
+// DEV_CMD codes used by this SDK (full list: Protocol Manual §3). Flash writes
+// (SAVE_*) block Modbus for ~25 ms: requests sent meanwhile get no reply.
+inline constexpr uint16_t DEV_CMD_SAVE_CONFIG  = 0x02;  // persist config regs (0x0182~, product code 0x01C0~) to flash
+inline constexpr uint16_t DEV_CMD_LOAD_CONFIG  = 0x03;  // reload config regs from flash (re-applies the sensor type)
+inline constexpr uint16_t DEV_CMD_FAULT_CLEAR  = 0x07;  // clear the fault history gFLTO (re-activation does not need it, fw >= v1.23)
 inline constexpr uint16_t DEV_CMD_SENSOR_ZERO  = 0x08;  // software tare of sensor Fx/Fy/Fz (RAM only)
 inline constexpr uint16_t DEV_CMD_TACTILE_SEND = 0x09;  // tactile CAN passthrough (TACT_CMD_*)
 inline constexpr uint16_t DEV_CMD_STROKE_CAL   = 0x0A;  // stroke calibration (~20 s, needs rACT=1)
 inline constexpr uint16_t DEV_CMD_TRAJ_APPLY   = 0x0E;  // apply TRAJ_MAX_VEL/ACC (RAM only)
 inline constexpr uint16_t DEV_CMD_TACTILE_CMD  = 0x0F;  // tactile structured command (TACT_SCMD_*)
 inline constexpr uint16_t DEV_CMD_REBOOT       = 0x10;  // reset after the ACK -> saved config applies (fw >= v1.20.0;
-                                                        // ERROR while active/calibrating or on older firmware)
+                                                        // ERROR while active/calibrating or on older firmware).
+                                                        // No DEV_STATUS: ACK, ~0.5-1 s silence, then replies resume
 
 // DEV_STATUS codes
 inline constexpr uint16_t DEV_STATUS_IDLE    = 0x00;

@@ -1,4 +1,4 @@
-# Developer command passthrough (docs/protocol/protocol.md §3, DEV_CMD 0x0180).
+# Developer command passthrough (DEV_CMD 0x0180, Protocol Manual §3).
 # Writes the command, then polls DEV_STATUS until OK/ERROR or timeout_sec.
 # Not advertised when the driver is built with -DAIDIN_ENABLE_DEV_CMD=OFF.
 

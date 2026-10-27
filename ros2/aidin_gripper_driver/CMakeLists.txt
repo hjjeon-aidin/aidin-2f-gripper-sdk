@@ -32,7 +32,7 @@ add_subdirectory(${AIDIN_SDK_DIR} aidin_sdk_build)
 # ---------------------------------------------------------------------------
 # Driver node
 # ---------------------------------------------------------------------------
-# OFF compiles the developer-command service (~/dev_cmd, protocol.md §3)
+# OFF compiles the developer-command service (~/dev_cmd, Protocol Manual §3)
 # out of the node entirely. ~/fault_clear stays available either way.
 option(AIDIN_ENABLE_DEV_CMD "Expose the ~/dev_cmd service" ON)
 

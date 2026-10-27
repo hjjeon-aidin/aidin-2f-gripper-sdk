@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "aidin-gripper"
-version = "1.0.0"
+version = "1.2.0"
 description = "Python SDK for the AIDIN BLDC gripper (DH-Robotics Modbus RTU)."
 readme = "README.md"
 requires-python = ">=3.8"
@@ -26,13 +26,16 @@ classifiers = [
     "Topic :: System :: Hardware",
 ]
 dependencies = [
-    "pymodbus>=3.0,<4.0",
+    # 3.0.x needs the optional pyserial-asyncio extra for its serial client;
+    # 3.1 - 3.9 take slave=, 3.10+ device_id= (the SDK picks the right one).
+    "pymodbus>=3.1,<4.0",
     "pyserial>=3.5",
 ]
 
 [project.urls]
-Homepage = "http://aidin-robotics.example"
-Documentation = "../cpp/MANUAL.md"
+Homepage = "https://github.com/hjjeon-aidin/aidin-2f-gripper-sdk"
+Documentation = "https://github.com/hjjeon-aidin/aidin-2f-gripper-sdk/blob/main/python/README.md"
+Issues = "https://github.com/hjjeon-aidin/aidin-2f-gripper-sdk/issues"
 
 [tool.setuptools.packages.find]
 include = ["aidin_gripper*"]

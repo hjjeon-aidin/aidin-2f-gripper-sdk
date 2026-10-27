@@ -3,7 +3,7 @@ aidin_gripper_driver:
     # Serial link
     port: "/dev/ttyUSB0"     # Windows: "COM3"
     baudrate: 115200
-    parity: "N"               # 'N' / 'E' / 'O'
+    parity: "N"               # keep "N": the firmware is fixed at 8N1
     slave_id: 1               # firmware default
 
     # Behaviour
@@ -11,6 +11,6 @@ aidin_gripper_driver:
     auto_activate: true       # set rACT=1 at startup
     auto_home: false          # call home() at startup (set true on systems where boot-time homing is safe)
 
-    # Fingertip tactile sensors (needs CFG_SENSOR_TYPE = 2, firmware protocol >= v1.18.0)
+    # Fingertip tactile sensors (needs CFG_SENSOR_TYPE = 2 saved with SAVE_CONFIG, firmware protocol >= v1.18.0)
     publish_tactile: false    # also read 0x0220~ each cycle and publish ~/tactile (TactileState);
                               # the launch file's publish_tactile:= argument overrides this

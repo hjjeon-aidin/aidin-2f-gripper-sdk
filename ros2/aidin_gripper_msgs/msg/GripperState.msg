@@ -11,9 +11,9 @@ uint8 STAGE_ACTIVE     = 3
 
 # ----- Object enum (gOBJ) -----
 uint8 OBJECT_MOVING         = 0
-uint8 OBJECT_OPEN_CONTACT   = 1   # object detected while opening
-uint8 OBJECT_CLOSED_CONTACT = 2   # object detected while closing
-uint8 OBJECT_AT_TARGET      = 3
+uint8 OBJECT_OPEN_CONTACT   = 1   # reserved — current firmware never reports contact via gOBJ
+uint8 OBJECT_CLOSED_CONTACT = 2   # reserved — current firmware never reports contact via gOBJ
+uint8 OBJECT_AT_TARGET      = 3   # move finished (also when an object stopped the fingers); grasp = position < target
 
 # ----- Status bits -----
 bool activated          # gACT
@@ -24,8 +24,8 @@ uint8 stage             # gSTA — use STAGE_* constants
 uint8 object_state      # gOBJ — use OBJECT_* constants
 
 # ----- Faults -----
-uint8 fault             # gFLT  (0 = OK, see firmware fault table)
-uint8 latched_fault     # gFLTO (sticky)
+uint8 fault             # gFLT  (live fault, 0 = OK, see the fault code table)
+uint8 latched_fault     # gFLTO (fault history: kept until ~/fault_clear, re-activating does not clear it)
 
 # ----- Live measurements -----
 uint8   position_echo   # gPR  (echo of last commanded rPR)

@@ -9,16 +9,18 @@ Mirrors the C++ SDK API:
 """
 from __future__ import annotations
 
+import inspect
 import threading
 import time
-from contextlib import contextmanager
-from typing import Optional
+from typing import Optional, Sequence
 
 from pymodbus.client import ModbusSerialClient
+from pymodbus.exceptions import ModbusException
 
 from . import registers as reg
 from .types import (
     FastState,
+    FirmwareInfo,
     GripperError,
     GripperStage,
     GripperState,
@@ -30,6 +32,30 @@ from .types import (
 
 _POLL_INTERVAL_S = 0.02
 _DEFAULT_TIMEOUT_S = 0.5
+# rHOM/rATR are rising-edge triggered and rGTO re-execution needs a 0->1
+# pulse (protocol v1.9.1) - hold each edge for this long.
+_EDGE_PULSE_S = 0.02
+# activate(): how long gACT may still read 0 after the rACT write before the
+# activation counts as refused. The firmware sets gACT=1 on the activating
+# write itself and drops it back to 0 when the motor cannot start.
+_ACTIVATE_GRACE_S = 0.3
+
+
+def _device_id_kw() -> str:
+    """pymodbus keyword for the slave address.
+
+    pymodbus 3.10+ only accepts ``device_id=``; 3.1-3.9 only ``slave=``
+    (3.1-3.6 would silently swallow an unknown keyword, so probing by trial is
+    not safe). Picked once from the installed client's signature.
+    """
+    try:
+        params = inspect.signature(ModbusSerialClient.read_holding_registers).parameters
+    except (TypeError, ValueError):
+        return "slave"
+    return "device_id" if "device_id" in params else "slave"
+
+
+_ID_KW = _device_id_kw()
 
 
 class _SharedPort:
@@ -65,6 +91,10 @@ class Gripper:
     once and shared (see _SharedPort). Each device must already have a
     distinct slave address programmed (registers.CFG_MB_ADDR) before
     being wired onto a shared bus.
+
+    Every Modbus transaction is serialized per port, so separate Gripper
+    instances may be used from separate threads. One instance is not meant
+    to be driven from several threads at once (its commands are multi-step).
     """
 
     def __init__(self) -> None:
@@ -72,6 +102,8 @@ class Gripper:
         self._shared: Optional[_SharedPort] = None
         self._port: Optional[str] = None
         self._slave_id: int = 1
+        self._last_action: int = 0       # last ACTION written (rGTO pulse decision)
+        self._last_position: int = -1    # last rPR written, -1 = none yet
 
     @property
     def slave_id(self) -> int:
@@ -88,7 +120,8 @@ class Gripper:
     ) -> None:
         """Open serial port and verify the slave responds.
 
-        port: "/dev/ttyUSB0" on Linux, "COM3" on Windows.
+        port: "/dev/ttyUSB0" on Linux, "COM3" on Windows. The firmware is
+        fixed at 8N1, so keep parity="N".
 
         If another Gripper already has this port open (e.g. a second
         device at a different slave_id on the same RS485 bus), the
@@ -97,6 +130,8 @@ class Gripper:
         physical link, not to one slave_id. response_timeout_s only takes
         effect on the connect() call that actually opens the port.
         """
+        if not (1 <= slave_id <= 247):
+            raise GripperError("slave id out of range (1..247)")
         self.disconnect()
 
         with _registry_lock:
@@ -126,6 +161,8 @@ class Gripper:
         self._client = shared.client
         self._port = port
         self._slave_id = slave_id
+        self._last_action = 0
+        self._last_position = -1
 
         # Sanity check: a single read to confirm the slave is alive.
         try:
@@ -162,39 +199,70 @@ class Gripper:
         self.disconnect()
 
     # ---------------------------- Commands ----------------------------
+    # Every command writes rACT=1, so after a fault (firmware >= v1.23 clears
+    # rACT) any command re-activates the gripper - but the firmware does not
+    # execute the move/home/release bits of that first re-activating write.
+    # Recovery: remove the cause -> activate() -> re-send the command. The
+    # blocking waits below raise GripperError (naming gFLT/gFLTO) as soon as
+    # the gripper reports gACT=0 or a fault, instead of running into a timeout.
     def activate(self, timeout_s: float = 3.0) -> None:
-        """Set rACT=1 and wait until gSTA reports ACTIVE."""
+        """Set rACT=1 and wait until gSTA reports ACTIVE.
+
+        This is also the fault recovery step (firmware >= v1.23): remove the
+        cause, then activate() - FAULT_CLEAR is not needed. Fails fast,
+        naming gFLT/gFLTO, when gACT falls back to 0 (the cause is still
+        present, or the motor did not start within ~1.5 s).
+        """
         self._write1(reg.ACTION, reg.RACT)
-        deadline = time.monotonic() + timeout_s
-        while time.monotonic() < deadline:
-            if self.read_state().stage == GripperStage.ACTIVE:
+        start = time.monotonic()
+        deadline = start + timeout_s
+        seen_active = False
+        while True:
+            s = self.read_state()
+            if s.stage == GripperStage.ACTIVE:
                 return
+            now = time.monotonic()
+            if s.activated:
+                seen_active = True
+            elif seen_active or now - start >= _ACTIVATE_GRACE_S:
+                raise GripperError(
+                    f"activate failed: gACT fell back to 0 ({_state_detail(s)}) - "
+                    "remove the cause and call activate() again (firmware <= v1.22: "
+                    "FAULT_CLEAR, deactivate(), then activate())")
+            if now >= deadline:
+                raise GripperError(
+                    f"activate timeout: gSTA never reached ACTIVE ({_state_detail(s)})")
             time.sleep(_POLL_INTERVAL_S)
-        raise GripperError("activate timeout (gSTA never reached ACTIVE)")
 
     def deactivate(self) -> None:
+        """Set rACT=0 (does not wait). Ends homing and force control (fw >= v1.25.1)."""
         self._write1(reg.ACTION, 0)
+
+    def stop(self) -> None:
+        """Stop an in-flight motion (rGTO=0). The motor stays active and holding."""
+        self._write1(reg.ACTION, reg.RACT)
 
     def home(self, timeout_s: float = 15.0) -> None:
         """Trigger homing and block until gHOM=1.
 
         The firmware homes on the rising edge of rHOM. We clear rHOM first,
-        wait briefly, then assert it.
+        wait briefly, then assert it. Homing runs at 100 % current whatever
+        rFR is (firmware >= v1.25.1).
         """
         self._write1(reg.ACTION, reg.RACT)              # ensure rHOM low
-        time.sleep(0.02)
+        time.sleep(_EDGE_PULSE_S)
         self._write1(reg.ACTION, reg.RACT | reg.RHOM)    # rising edge
         time.sleep(0.10)                                  # let firmware clear gHOM
 
         deadline = time.monotonic() + timeout_s
         while time.monotonic() < deadline:
             s = self.read_state()
-            if s.fault:
-                raise GripperError(f"homing fault code={s.fault}")
+            _raise_if_stopped(s, "home")
             if s.homed:
                 self._write1(reg.ACTION, reg.RACT)        # release rHOM
                 return
             time.sleep(0.05)
+        self._write1(reg.ACTION, reg.RACT)                # don't leave rHOM set
         raise GripperError("home timeout")
 
     def full_init(self, timeout_s: float = 30.0) -> None:
@@ -208,7 +276,7 @@ class Gripper:
         # The trigger is edge-detected on the written VALUE, so write plain
         # rACT first to guarantee a fresh edge regardless of prior state.
         self._write1(reg.ACTION, reg.RACT)
-        time.sleep(0.02)
+        time.sleep(_EDGE_PULSE_S)
         self._write1(reg.ACTION, reg.ACTION_FULL_INIT)
 
         # DEV_STATUS may still hold a previous command's OK — only trust a
@@ -218,8 +286,7 @@ class Gripper:
         deadline = time.monotonic() + timeout_s
         while time.monotonic() < deadline:
             s = self.read_state()
-            if s.fault:
-                raise GripperError(f"full-init fault code={s.fault}")
+            _raise_if_stopped(s, "full-init")
             dev = self.read_register(reg.DEV_STATUS)
             if dev == reg.DEV_STATUS_RUNNING:
                 saw_running = True
@@ -255,16 +322,30 @@ class Gripper:
     ) -> None:
         """Move to absolute position. 0 = fully open, 255 = fully closed.
 
-        speed, force: 0..255.  blocking=True polls until gOBJ != MOVING.
+        speed, force: 0..255 (force = current limit, rated current x force/255;
+        0 = no force). Re-issuing the same position pulses rGTO 0->1 so the
+        firmware plans a new trajectory (v1.9.1 rule). blocking=True polls
+        until gOBJ != MOVING and raises if the move was not executed (gGTO=0:
+        not homed, force control active, or the write re-activated the
+        gripper after a fault - re-send it then).
         """
         _u8(position, "position")
         _u8(speed,    "speed")
         _u8(force,    "force")
 
-        self._write1(reg.SPEED,    speed)
-        self._write1(reg.FORCE,    force)
-        self._write1(reg.POSITION, position)
-        self._write1(reg.ACTION,   reg.RACT | reg.RGTO)
+        self._write1(reg.SPEED, speed)
+        self._write1(reg.FORCE, force)
+
+        # Firmware executes goto only on an rGTO rising edge OR an rPR change
+        # (protocol v1.9.1). Re-issuing the same position while rGTO is
+        # already high would be silently ignored — pulse rGTO 0->1 instead.
+        same_pos = self._last_position == position
+        if same_pos and (self._last_action & reg.RGTO):
+            self._write1(reg.ACTION, reg.RACT)
+            time.sleep(_EDGE_PULSE_S)
+        elif not same_pos:
+            self._write1(reg.POSITION, position)        # rPR first, ACTION last
+        self._write1(reg.ACTION, reg.RACT | reg.RGTO)
 
         if not blocking:
             return
@@ -273,16 +354,29 @@ class Gripper:
         deadline = time.monotonic() + timeout_s
         while time.monotonic() < deadline:
             s = self.read_state()
-            if s.fault:
-                raise GripperError(f"move fault code={s.fault}")
+            _raise_if_stopped(s, "move_to")
+            if not s.go_to_active:
+                raise GripperError(_not_executed_text(s))
             if s.object_state != ObjectState.MOVING:
                 return
             time.sleep(_POLL_INTERVAL_S)
         raise GripperError("move_to timeout")
 
     def emergency_release(self, close_direction: bool = False) -> None:
-        bits = reg.RATR | (reg.RADR if close_direction else 0)
+        """Emergency auto-release: drive the fingers fully open (or closed).
+
+        Pulses rATR with rACT held (rADR = direction) and returns without
+        waiting. Force control ends (FC_MODE=0); the gripper stays active and
+        the next move_to() works normally. After a fault the write only
+        re-activates the gripper and the release is skipped (firmware
+        >= v1.23) - call activate() first, then emergency_release().
+        """
+        # rATR is a rising edge processed only together with rACT=1 —
+        # writing rATR alone would just deactivate the motor.
+        bits = reg.RACT | reg.RATR | (reg.RADR if close_direction else 0)
         self._write1(reg.ACTION, bits)
+        time.sleep(_EDGE_PULSE_S)
+        self._write1(reg.ACTION, reg.RACT)
 
     # ---------------------------- Status ----------------------------
     def read_state(self) -> GripperState:
@@ -335,8 +429,29 @@ class Gripper:
             left         = _fast_tip(regs[6:9]),
         )
 
+    # ---------------------------- Device information ----------------------------
+    def read_serial_number(self) -> str:
+        """Serial number ``"<product code>-<YYMM>-<NNNN>"``, e.g. ``"BLDC2FV1-2610-0001"``.
+
+        Firmware >= v1.24.0. Returns ``""`` when nothing is recorded (all
+        words 0). Firmware <= v1.23 has no product code: returns ``"YYMM-NNNN"``.
+        """
+        code = self._read_block(reg.CFG_PRODUCT_CODE, reg.CFG_PRODUCT_CODE_WORDS)
+        number, yymm = self._read_block(reg.CFG_SERIAL_LO, 2)
+        return _format_serial(code, yymm, number)
+
+    def read_firmware_info(self) -> FirmwareInfo:
+        """Firmware version + build info (0x01C4..0x01CB) in one transaction.
+
+        Firmware >= v1.25.0. On older firmware every field is 0:
+        ``has_version`` is False and ``str(info)`` reads
+        "<= 1.24 (no version registers)".
+        """
+        return _decode_firmware_info(self._read_block(reg.FW_VER_MAJOR, reg.FW_INFO_WORDS))
+
     # ---------------------------- Tactile sensor ----------------------------
-    # Needs CFG_SENSOR_TYPE = SENSOR_TACTILE (2) - set it, SAVE_CONFIG, power cycle.
+    # Needs CFG_SENSOR_TYPE = SENSOR_TACTILE (2) - write it, then SAVE_CONFIG
+    # (applies immediately, no reboot).
     def read_tactile(self) -> tuple[TactileTip, TactileTip]:
         """Read both fingertips' contact resultant (0x0220..0x022F, one transaction).
 
@@ -417,30 +532,38 @@ class Gripper:
             raise GripperError("not connected")
         return self._shared
 
-    def _write1(self, addr: int, value: int) -> None:
+    def _transact(self, what: str, method: str, *args, **kwargs):
+        """Run one pymodbus request under the port lock; every failure -> GripperError.
+
+        pymodbus <= 3.6 returns timeouts as error responses, 3.9+ raises them
+        (ModbusIOException / ConnectionException); both end up here.
+        """
         shared = self._require_shared()
-        with shared.lock:
-            rr = shared.client.write_register(addr, value & 0xFFFF, slave=self._slave_id)
-        if rr.isError():
-            raise GripperError(
-                f"write_register(0x{addr:04X}, 0x{value:04X}) failed: {rr}")
+        kwargs[_ID_KW] = self._slave_id
+        try:
+            with shared.lock:
+                rr = getattr(shared.client, method)(*args, **kwargs)
+        except (ModbusException, OSError) as exc:
+            raise GripperError(f"{what} failed: {exc}") from exc
+        if rr is None or rr.isError():
+            raise GripperError(f"{what} failed: {rr}")
+        return rr
+
+    def _write1(self, addr: int, value: int) -> None:
+        self._transact(f"write_register(0x{addr:04X}, 0x{value & 0xFFFF:04X})",
+                       "write_register", addr, value & 0xFFFF)
+        if addr == reg.ACTION:
+            self._last_action = value & 0xFFFF
+        elif addr == reg.POSITION:
+            self._last_position = value & 0xFF
 
     def _write_block(self, addr: int, values: list[int]) -> None:
-        shared = self._require_shared()
-        with shared.lock:
-            rr = shared.client.write_registers(
-                addr, [v & 0xFFFF for v in values], slave=self._slave_id)
-        if rr.isError():
-            raise GripperError(
-                f"write_registers(0x{addr:04X}, {len(values)}) failed: {rr}")
+        self._transact(f"write_registers(0x{addr:04X}, {len(values)})",
+                       "write_registers", addr, [v & 0xFFFF for v in values])
 
     def _read_block(self, addr: int, count: int) -> list[int]:
-        shared = self._require_shared()
-        with shared.lock:
-            rr = shared.client.read_holding_registers(addr, count=count, slave=self._slave_id)
-        if rr.isError():
-            raise GripperError(
-                f"read_holding_registers(0x{addr:04X}, {count}) failed: {rr}")
+        rr = self._transact(f"read_holding_registers(0x{addr:04X}, {count})",
+                            "read_holding_registers", addr, count=count)
         return list(rr.registers)
 
     def _run_dev_cmd(self, code: int, name: str, reject_hint: str = "DEV_STATUS=ERROR") -> None:
@@ -459,6 +582,67 @@ class Gripper:
                 raise GripperError(f"{name} rejected ({reject_hint})")
             time.sleep(0.02)
         raise GripperError(f"{name} timeout")
+
+
+_FAULT_NAMES = {
+    0: "OK", 1: "not initialized", 2: "invalid command", 3: "invalid parameter",
+    4: "over-current", 5: "over-temperature", 6: "under-voltage", 7: "motor stall",
+    8: "sensor error", 9: "comm timeout", 10: "internal error", 11: "gate-driver fault",
+}
+
+
+def _fault_text(code: int) -> str:
+    return f"{code} ({_FAULT_NAMES.get(code, 'unknown')})"
+
+
+def _state_detail(s: GripperState) -> str:
+    return (f"gACT={int(s.activated)}, gFLT={_fault_text(s.fault)}, "
+            f"gFLTO={_fault_text(s.latched_fault)}")
+
+
+def _raise_if_stopped(s: GripperState, what: str) -> None:
+    """Blocking waits: stop as soon as the motor is off (gACT=0) or faulted."""
+    if s.fault or not s.activated:
+        raise GripperError(
+            f"{what} stopped: gripper not active or faulted ({_state_detail(s)}) - "
+            "remove the cause, call activate(), then re-send the command")
+
+
+def _not_executed_text(s: GripperState) -> str:
+    if not s.homed:
+        return "move_to not executed: gripper not homed (gHOM=0) - call home() first"
+    return ("move_to not executed (gGTO=0): force control is active (FC_MODE != 0), "
+            "or this write re-activated the gripper after a fault - re-send the move")
+
+
+def _decode_ascii(words: Sequence[int]) -> str:
+    """2 chars per word, high byte first, ends at the first 0x00 byte."""
+    out = []
+    for w in words:
+        for b in ((w >> 8) & 0xFF, w & 0xFF):
+            if b == 0:
+                return "".join(out)
+            out.append(chr(b) if 0x20 <= b < 0x7F else "?")
+    return "".join(out)
+
+
+def _format_serial(code_words: Sequence[int], yymm: int, number: int) -> str:
+    code = _decode_ascii(code_words)
+    if not code and not yymm and not number:
+        return ""                                   # not recorded
+    tail = f"{yymm:04d}-{number:04d}"
+    return f"{code}-{tail}" if code else tail       # no product code: firmware <= v1.23
+
+
+def _decode_firmware_info(w: Sequence[int]) -> FirmwareInfo:
+    flags = w[5]
+    return FirmwareInfo(
+        major=w[0], minor=w[1], patch=w[2],
+        git_hash=((w[3] & 0xFFFF) << 16) | (w[4] & 0xFFFF),
+        dirty=bool(flags & reg.FW_BUILD_DIRTY),
+        no_info=bool(flags & reg.FW_BUILD_NO_INFO),
+        build_yymm=w[6], build_ddhh=w[7],
+    )
 
 
 def _u8(v: int, name: str) -> None:
