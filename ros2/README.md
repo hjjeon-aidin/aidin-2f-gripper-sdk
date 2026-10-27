@@ -159,7 +159,7 @@ ros2 run aidin_gripper_examples tactile_listener
 | `homed`             | bool     | gHOM |
 | `go_to_active`      | bool     | gGTO |
 | `stage`             | uint8    | `STAGE_RESET=0`, `STAGE_ACTIVATING=1`, `STAGE_ACTIVE=3` |
-| `object_state`      | uint8    | `OBJECT_MOVING=0`, `OPEN_CONTACT=1`, `CLOSED_CONTACT=2`, `AT_TARGET=3` |
+| `object_state`      | uint8    | `OBJECT_MOVING=0`, `OPEN_CONTACT=1`, `CLOSED_CONTACT=2`, `AT_TARGET=3` — 1/2 are reserved (planned for the next firmware version); for now detect a grasp by `AT_TARGET` with `position` short of the target |
 | `fault`             | uint8    | gFLT — live fault (0 = OK) |
 | `latched_fault`     | uint8    | gFLTO — fault history, kept until `fault_clear` (re-activating does not clear it) |
 | `position_echo`     | uint8    | gPR (echo of last `rPR`) |

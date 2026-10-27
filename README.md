@@ -253,7 +253,7 @@ motor off — a fault or a failed start — skips `rGTO`/`rHOM`/`rATR`.
 | 1 | `gHOM` | homed |
 | 3 | `gGTO` | echo of `rGTO` |
 | 4-5 | `gSTA` | `00`=Reset, `01`=Activating, `11`=Active |
-| 6-7 | `gOBJ` | `00`=Moving, `11`=move finished (also when an object stopped the fingers before the target). `01`/`10` (contact while opening/closing) are reserved — current firmware never reports them. To detect a grasp, wait for `11`, then compare the position `gPO` with the target `gPR`: closing stopped clearly short of the target = object held (`gCU` stays near the force limit). |
+| 6-7 | `gOBJ` | `00`=Moving, `11`=move finished (also when an object stopped the fingers before the target). `01`/`10` (contact while opening/closing) are reserved — current firmware never reports them; support is planned for the next firmware version. Until then, to detect a grasp, wait for `11`, then compare the position `gPO` with the target `gPR`: closing stopped clearly short of the target = object held (`gCU` stays near the force limit). |
 
 ### Fault codes / 폴트 코드 (`gFLT` / `gFLTO`)
 

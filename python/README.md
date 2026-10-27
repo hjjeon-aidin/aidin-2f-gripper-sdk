@@ -228,7 +228,7 @@ class GripperState:
     homed:         bool
     go_to_active:  bool
     stage:         GripperStage   # RESET / ACTIVATING / ACTIVE
-    object_state:  ObjectState    # MOVING / OPEN_CONTACT / CLOSED_CONTACT / AT_TARGET
+    object_state:  ObjectState    # MOVING / AT_TARGET (OPEN_/CLOSED_CONTACT reserved: planned for the next firmware version)
     fault:         int            # 0 = OK
     position_echo: int            # gPR
     position:      int            # gPO (0..255)

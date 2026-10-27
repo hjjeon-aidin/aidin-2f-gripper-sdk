@@ -4,7 +4,7 @@
   <name>aidin_gripper_examples</name>
   <version>1.2.0</version>
   <description>Python CLI client examples for the AIDIN gripper ROS2 driver.</description>
-  <maintainer email="firmware@aidin.example">AIDIN Robotics Firmware Team</maintainer>
+  <maintainer email="hj.jeon@aidinrobotics.co.kr">AIDIN Robotics Firmware Team</maintainer>
   <license>MIT</license>
   <url type="repository">https://github.com/hjjeon-aidin/aidin-2f-gripper-sdk</url>
   <url type="bugtracker">https://github.com/hjjeon-aidin/aidin-2f-gripper-sdk/issues</url>

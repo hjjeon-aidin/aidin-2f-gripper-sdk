@@ -218,7 +218,8 @@ do not change the baud on it.
 | `gOBJ = 2`       | `ObjectState::ClosedContact`   | Reserved — current firmware never reports it. |
 | `gOBJ = 3`       | `ObjectState::AtTarget`        | Move finished — also when an object stopped the fingers before the target. |
 
-**Grasp detection.** Contact is not reported through `gOBJ`. After `AtTarget`,
+**Grasp detection.** Contact is not reported through `gOBJ` yet — support for
+`OpenContact`/`ClosedContact` is planned for the next firmware version. Until then, after `AtTarget`,
 compare `position` (gPO) with the commanded target (gPR): a closing move that
 stopped clearly short of the target means an object is held, and `current`
 (gCU) stays near the force limit. Choose the tolerance for your object.

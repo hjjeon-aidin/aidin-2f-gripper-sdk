@@ -4,7 +4,7 @@
   <name>aidin_gripper_msgs</name>
   <version>1.2.0</version>
   <description>Custom messages and services for the AIDIN BLDC gripper (DH-Robotics Modbus RTU).</description>
-  <maintainer email="firmware@aidin.example">AIDIN Robotics Firmware Team</maintainer>
+  <maintainer email="hj.jeon@aidinrobotics.co.kr">AIDIN Robotics Firmware Team</maintainer>
   <license>MIT</license>
   <url type="repository">https://github.com/hjjeon-aidin/aidin-2f-gripper-sdk</url>
   <url type="bugtracker">https://github.com/hjjeon-aidin/aidin-2f-gripper-sdk/issues</url>

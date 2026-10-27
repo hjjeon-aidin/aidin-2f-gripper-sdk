@@ -14,7 +14,7 @@ setup(
     install_requires=["setuptools"],
     zip_safe=True,
     maintainer="AIDIN Robotics Firmware Team",
-    maintainer_email="firmware@aidin.example",
+    maintainer_email="hj.jeon@aidinrobotics.co.kr",
     description="Python CLI examples for the AIDIN gripper ROS2 driver.",
     license="MIT",
     entry_points={
