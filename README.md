@@ -43,6 +43,7 @@ firmware ≤ v1.24 reports 0.0.0.
 | Serial number `read_serial_number()` | ≥ 1.24.0 (older: the `YYMM-NNNN` part only) |
 | Firmware info `read_firmware_info()` | ≥ 1.25.0 (older: 0.0.0) |
 | `rSP`/`rFR` written while inactive applied at activation · homing at 100 % current · deactivation ends homing and force control | ≥ 1.25.1 |
+| AFT_XXX-C F/T sensor (AFT_RBY2-C …) — values, link diagnostics `0x021E`, sensor commands ([details](#aft-ft-sensor--aft-ft-센서-0x02100x021f)) | ≥ 1.26.0 |
 
 Python: `pymodbus` 3.1 – 3.x. pymodbus 3.10 renamed the slave keyword
 `slave=` → `device_id=`; SDK 1.2.0 detects which one the installed
@@ -67,6 +68,7 @@ same order, regardless of which interface you pick.
 | 5 | Move (open/close) / 이동 | `g.move_to(pos, speed, force, blocking=True)` | `.../move_to` (`MoveTo` service) | `rPR`/`rSP`/`rFR` + `rGTO` |
 | 6 | Monitor status / 상태 모니터링 | `g.read_state()` | subscribe `/aidin_gripper_driver/state` | `gSTA`/`gOBJ`/`gPO`/`gFLT` |
 | (opt) | Tactile sensors / 촉각 센서 | `g.read_tactile()` | `publish_tactile:=true` → `/aidin_gripper_driver/tactile` | `0x0220~` — see [Tactile sensor](#tactile-sensor--촉각-센서-0x0220) |
+| (opt) | AFT F/T sensor / F/T 센서 | `g.read_register(0x0210 + i)` | — (SDK only) | `0x0210~` — see [AFT F/T sensor](#aft-ft-sensor--aft-ft-센서-0x02100x021f) |
 | (opt) | Fast poll / 고속 폴링 | `g.read_fast_state()` | — (SDK only) | `0x02C0~` — see [Fast-poll block](#fast-poll-block--고속-폴링-블록-0x02c00x02c9) |
 | (opt) | Device info / 장치 정보 | `g.read_firmware_info()`, `g.read_serial_number()` | `.../get_device_info` (`Trigger`) | `0x01C4~`, `0x01C0~` + `0x0188~` — see [Serial number and firmware info](#serial-number-and-firmware-info--시리얼-번호펌웨어-정보-0x01c0) |
 | — | Recover from a fault / 고장 복구 | remove the cause → `g.activate()` → re-send the command | `.../activate` → re-send | the fault switched the gripper off (`gACT` = 0) — see [Fault deactivation](#fault-deactivation--폴트-시-비활성화) |
@@ -432,18 +434,160 @@ Fingertip sensor values relayed from CAN; select the sensor with
 `CFG_SENSOR_TYPE` (0x018A: 1 = AFT F/T, 2 = tactile) + `SAVE_CONFIG`
 (applies immediately). Tip 1 = **right** finger, tip 2 = **left** finger.
 The SDKs wrap the tactile sensor; AFT F/T values are read with the raw
-register calls. 상태 비트필드와 스케일링 상세는 매뉴얼 참고.
+register calls — step by step in [AFT F/T sensor](#aft-ft-sensor--aft-ft-센서-0x02100x021f).
 
 | Addr | R/W | Field | Meaning |
 |---|---|---|---|
-| `0x0210~0x0216` | R | `SENSOR_STATUS`, `FT_FX..FT_TZ` | tip 1 six-axis F/T — force [N × 100], torque [Nm × 1000]. With the tactile sensor: its Fx/Fy/Fz, torque 0 |
+| `0x0210~0x0216` | R | `SENSOR_STATUS`, `FT_FX..FT_TZ` | tip 1 six-axis F/T — force [N × 100], torque [Nm × 1000]. AFT_XXX-C lands here. With the tactile sensor: its Fx/Fy/Fz, torque 0 |
 | `0x0217~0x021D` | R | `SENSOR2_STATUS`, `FT2_FX..FT2_TZ` | tip 2, same layout — poll both tips as one 14-register block read |
+| `0x021E` | R | `AFT_LINK` | AFT_XXX-C receive diagnostics: rate [Hz], frame format, CAN bus error, error word present (v1.26.0) — [details](#aft-ft-sensor--aft-ft-센서-0x02100x021f) |
+| `0x021F` | R | `AFT_ERRWORD` | AFT_XXX-C last error word, raw (v1.26.0) |
 | `0x0220~0x0227` | R | `TACT1_*` | tip 1 tactile resultant: status, contact point X/Y [mm × 100], Fx/Fy/Fz [N × 100], rate [Hz], frame count — [details](#tactile-sensor--촉각-센서-0x0220) |
 | `0x0228~0x022F` | R | `TACT2_*` | tip 2, same layout — poll both tips as one 16-register block read from `0x0220` |
 | `0x0230~0x0276` / `0x0277~0x02BD` | R | `TACT1_RAW` / `TACT2_RAW` | raw 69-channel diagnostic stream per tip (bring-up only) — valid while status `raw_fresh` = 1 |
-| `0x01B0~0x01BA` | W | `TACT_CMD_*` | tactile CAN passthrough (tip, len, data[8], CAN ID) — sent as CAN FD with `DEV_CMD 0x09` |
-| `0x01BB~0x01BD` | W | `TACT_SCMD_*` | tactile structured command (code, tip bitmask, arg) — run with `DEV_CMD 0x0F` |
+| `0x01B0~0x01BA` | W | `TACT_CMD_*` | sensor CAN passthrough (tip, len, data[8], CAN ID) — sent with `DEV_CMD 0x09`: CAN FD to the tactile sensor, classic CAN to AFT_XXX-C |
+| `0x01BB~0x01BD` | W | `TACT_SCMD_*` | sensor structured command (code, tip bitmask, arg) — run with `DEV_CMD 0x0F`; tactile or AFT_XXX-C, depending on `CFG_SENSOR_TYPE` |
 | `0x02C0~0x02C9` | R | `FAST_*` | fast-poll block: status + position + current + both tips' tactile + fault in one read — [details](#fast-poll-block--고속-폴링-블록-0x02c00x02c9) |
+
+### AFT F/T sensor / AFT F/T 센서 (`0x0210~0x021F`)
+
+Firmware ≥ v1.26.0 for the AFT_XXX-C series (e.g. **AFT_RBY2-C**,
+400 N / 20 Nm). One six-axis force/torque sensor is mounted on the
+gripper's CAN bus; the firmware decodes its frames and puts the six
+values in the **tip 1** block. This section is newer than Protocol
+Manual Rev 2.6 (Spec v1.25.1).
+
+AFT_XXX-C 6축 힘/토크 센서(예: AFT_RBY2-C)를 그리퍼 CAN 버스에 연결하면
+펌웨어가 프레임을 디코드해 **팁 1 블록(`0x0210~0x0216`)** 에 넣습니다
+(펌웨어 v1.26.0 이상). 센서 1대 기준이며, 팁 2 블록은 비어 있습니다.
+
+- **No gripper-side CAN setting.** The sensor may run in CAN 2.0 (its
+  default, IDs `0x280`/`0x281`) or CAN FD (`0x380`~`0x382`, INT or Float
+  output); the firmware detects the format from each frame. Keep the
+  sensor's default CAN ID.
+- **Same sensor type as AFT50-D15.** `CFG_SENSOR_TYPE` = 1 (AFT) covers
+  both; the firmware tells them apart by CAN ID.
+- AFT50-D15 (two sensors, IDs `0x1A`~`0x1D`) uses the same `0x0210~0x021D`
+  layout on any firmware; `0x021E`/`0x021F` stay 0 for it.
+
+**Registers — read 16 registers from `0x0210` in one request**
+
+| Addr | Field | Type | Meaning |
+|---|---|---|---|
+| `0x0210` | `SENSOR_STATUS` | bitfield | tip 1 status — table below |
+| `0x0211` / `0x0212` / `0x0213` | `FT_FX` / `FT_FY` / `FT_FZ` | int16 | force [N × 100] — resolution 0.01 N |
+| `0x0214` / `0x0215` / `0x0216` | `FT_TX` / `FT_TY` / `FT_TZ` | int16 | torque [Nm × 1000] — resolution 0.001 Nm |
+| `0x0217~0x021D` | `SENSOR2_STATUS`, `FT2_*` | — | tip 2 (AFT50-D15 only). With AFT_XXX-C: `timeout` set, values 0 |
+| `0x021E` | `AFT_LINK` | bitfield | receive diagnostics — table below |
+| `0x021F` | `AFT_ERRWORD` | uint16 | the 2-byte error word the sensor appends when its error packet is on, passed through uninterpreted; 0 if none |
+
+`N = FT_Fx / 100`, `Nm = FT_Tx / 1000` (signed 16-bit). The axes and
+signs are the sensor's own frame. Because the value is int16, force
+saturates at **±327.67 N** (below the 400 N rating) and `saturated` is
+set.
+
+**`SENSOR_STATUS` bits (`0x0210`)**
+
+| Bit | Mask | Name | Meaning |
+|---|---|---|---|
+| 0–7 | `0x00FF` | `type` | active sensor type: 1 = AFT |
+| 8 | `0x0100` | `valid` | a complete measurement arrived recently and the values are valid |
+| 9 | `0x0200` | `saturated` | an axis hit the int16 limit (or a Float value was outside it) |
+| 10 | `0x0400` | `timeout` | no F/T frame for 50 ms — sensor off, cable, or bus problem |
+
+A healthy stream reads `0x0101` (type 1 + valid).
+
+**`AFT_LINK` bits (`0x021E`)**
+
+| Bit | Mask | Name | Meaning |
+|---|---|---|---|
+| 0–10 | `0x07FF` | `rate` | F/T sets received in the last second [Hz] — compare with the sensor's output rate (100 / 250 / 500 / 1000) |
+| 11–13 | `0x3800` | `format` | last frame format: 0 = nothing received since boot (or since the sensor type was re-selected) · 1 = CAN 2.0 INT · 2 = FD INT · 3 = FD Combined INT · 4 = FD Combined Float |
+| 14 | `0x4000` | `can_err` | the gripper's CAN controller is error-passive now, or went bus-off in the last second (and recovered by itself) — check bit rate, termination, wiring |
+| 15 | `0x8000` | `errword` | the last F/T frame carried an error word (value in `0x021F`) |
+
+Reading `AFT_LINK` — what to check first:
+
+| `format` | `rate` | `can_err` | Meaning |
+|:-:|:-:|:-:|---|
+| ≠ 0 | ≈ sensor rate | 0 | normal |
+| 0 | 0 | 0 | no AFT_XXX-C frame yet: sensor power, cable, `CFG_SENSOR_TYPE` ≠ 1 (then the whole register reads 0) |
+| 0 | 0 | 1 | frames on the bus but errors: bit rate, termination, wiring |
+| ≠ 0 | 0 | — | the sensor stopped sending (e.g. after an output-mode change, sensor power); `timeout` = 1 |
+
+**How to read it / 읽는 방법**
+
+1. **Once**: write `CFG_SENSOR_TYPE` (`0x018A`) = 1 → `DEV_CMD` = `0x02`
+   (`SAVE_CONFIG`); it applies immediately, no reboot.
+2. Power the sensor. `SENSOR_STATUS` becomes `0x0101` and `AFT_LINK`
+   shows the format and rate within a second.
+3. Read **16 registers from `0x0210`** at whatever rate you need (the
+   sensor's output rate is the upper bound of new data).
+4. **Zero** with no load: `DEV_CMD` = `0x08` (`SENSOR_ZERO`) — a software
+   tare of all six axes in the gripper, RAM only (cleared on reboot). Use
+   this for routine zeroing.
+5. For force control with this sensor as feedback, set `FC_FB_SRC`
+   (`0x01A7`) = 1 (tip 1 Fz).
+
+Python (SDK 1.2.0 has no F/T helper and no public block read, so this reads
+register by register — fine for monitoring; for a consistent snapshot,
+read the 16 registers in one FC 0x03 request in your own client):
+
+```python
+import time
+from aidin_gripper import Gripper
+from aidin_gripper import registers as reg
+
+def s16(v):                      # register value -> signed int16
+    return v - 0x10000 if v & 0x8000 else v
+
+with Gripper() as g:
+    g.connect("/dev/ttyUSB0")    # Windows: "COM3"
+
+    if g.read_register(reg.CFG_SENSOR_TYPE) != reg.SENSOR_AFT:   # one-time setup
+        g.write_register(reg.CFG_SENSOR_TYPE, reg.SENSOR_AFT)
+        g.write_register(reg.DEV_CMD, reg.DEV_CMD_SAVE_CONFIG)
+        time.sleep(0.2)          # flash write blocks Modbus ~25 ms
+
+    status = g.read_register(0x0210)
+    link   = g.read_register(0x021E)
+    print(f"status 0x{status:04X}  rate {link & 0x07FF} Hz  "
+          f"format {(link >> 11) & 0x7}  can_err {(link >> 14) & 1}")
+
+    if status & 0x0100:          # valid
+        fx, fy, fz = (s16(g.read_register(0x0211 + i)) / 100  for i in range(3))
+        tx, ty, tz = (s16(g.read_register(0x0214 + i)) / 1000 for i in range(3))
+        print(f"F [N] {fx:.2f} {fy:.2f} {fz:.2f}   T [Nm] {tx:.3f} {ty:.3f} {tz:.3f}")
+
+    # g.sensor_zero()            # software tare of all six axes — only with no load on the sensor
+```
+
+C++: the same with `g.readRegister(0x0211)` cast to `int16_t`, and
+`g.sensorZero()`.
+
+**Sensor commands / 센서 명령** (structured command, as for the tactile
+sensor): write `0x01BB` = code, `0x01BC` = `0x01` (tip 1), `0x01BD` = arg,
+then `DEV_CMD` = `0x0F` — or call `g.tactile_command(code, 0x01, arg)` /
+`g.tactileCommand(code, 0x01, arg)`, which does exactly that for either
+sensor type.
+
+| Code | Name | Arg | What it does on AFT_XXX-C |
+|---|---|---|---|
+| `0x01` | ZERO | — | sensor BIAS — **stored in the sensor's flash**, and clears the gripper's software tare. For routine zeroing use `DEV_CMD 0x08` instead |
+| `0x03` | SET_OUTPUT | `(CAN mode << 8) \| data type` | CAN mode 1 = CAN 2.0, 2 = FD (BRS off), 3 = FD (BRS on), 0 = keep. Data type 1 = INT, 2 = INT + temperature compensation, 3/4 = Combined INT, 5/6 = Float (3–6 need FD). The sensor stops for a moment and the firmware restarts it |
+| `0x04` | SET_RATE | 100 / 250 / 500 / 1000 | sensor output rate [Hz] |
+| `0x05` | FACTORY_RESET | `0xA5A5` | resets the sensor's ID, rate and bias (every AFT sensor on the bus) |
+
+- `DEV_STATUS` = OK only means the command frame was sent — the sensor
+  does not reply. Check the result in `AFT_LINK` (`format`, `rate`).
+- ERROR: code `0x02` (SET_CAN_ID, not supported), an out-of-range arg,
+  tip bitmask without bit 0, a SET_OUTPUT still in progress, or
+  ZERO / SET_OUTPUT / FACTORY_RESET while force control uses the sensor
+  as feedback (`FC_MODE` ≠ 0 and `FC_FB_SRC` = 1–3).
+- Raw frames: the passthrough (`0x01B0~`, `DEV_CMD 0x09`) sends the bytes
+  as one classic CAN frame; with `TACT_CMD_CANID` = 0 the firmware picks
+  the sensor's command ID (`0x225` for CAN 2.0, `0x325` for FD). The
+  host includes the sensor's TX-ID prefix (`80 02` / `80 03`) itself.
 
 ### Tactile sensor / 촉각 센서 (`0x0220~`)
 
@@ -821,10 +965,10 @@ PID 저장/복원 등)과 절차는 매뉴얼 참고.
 | `0x03` | `LOAD_CONFIG` | reload the config registers from flash (re-applies the sensor type and response delay) |
 | `0x07` | `FAULT_CLEAR` | clear the fault history `gFLTO` (and acknowledge the motor fault) — not needed to re-activate after a fault (v1.23+) |
 | `0x08` | `SENSOR_ZERO` | software tare of the fingertip sensors — F/T Fx..Tz, tactile Fx/Fy/Fz (per-session, RAM only) |
-| `0x09` | `TACTILE_SEND` | send the `TACT_CMD_*` bytes (`0x01B0~`) to the tactile sensor as one CAN FD frame, uninterpreted |
+| `0x09` | `TACTILE_SEND` | send the `TACT_CMD_*` bytes (`0x01B0~`) to the sensor, uninterpreted — one CAN FD frame to the tactile sensor, one classic CAN frame to AFT_XXX-C (v1.26.0) |
 | `0x0A` | `STROKE_CAL` | re-measure the usable stroke after a fingertip change (~20 s, saved to flash) |
 | `0x0E` | `TRAJ_APPLY` | apply `TRAJ_MAX_VEL/ACC` (`0x019B/0x019C`) to the trajectory generator — RAM only; rejected (ERROR) out of range or during homing/calibration |
-| `0x0F` | `TACTILE_CMD` | run the tactile structured command in `0x01BB~0x01BD` — `0x01` ZERO (sensor no-load zero), `0x05` FACTORY_RESET (arg `0xA5A5`); `0x02~0x04` unsupported (ERROR) |
+| `0x0F` | `TACTILE_CMD` | run the sensor structured command in `0x01BB~0x01BD`. Tactile: `0x01` ZERO (sensor no-load zero), `0x05` FACTORY_RESET (arg `0xA5A5`); `0x02~0x04` unsupported (ERROR). AFT_XXX-C (v1.26.0): `0x01` ZERO (sensor BIAS), `0x03` SET_OUTPUT, `0x04` SET_RATE, `0x05` FACTORY_RESET — [details](#aft-ft-sensor--aft-ft-센서-0x02100x021f) |
 | `0x10` | `REBOOT` | software reset after the write is acknowledged — applies the saved baud / slave address (v1.20). ERROR while the motor is active. No `DEV_STATUS`: the gripper is silent ~0.5 – 1 s, then answers at the saved settings |
 
 > Flash-writing commands (`SAVE_CONFIG`, `SAVE_PID`, `FF_SAVE`, and the
@@ -864,6 +1008,10 @@ PID 저장/복원 등)과 절차는 매뉴얼 참고.
   `POSX` of 0 means "no contact point", not "at the edge". Only zero the
   sensor (`TACTILE_CMD` ZERO) with nothing touching the pads, and expect
   ~1.25 s of `WAITING` (valid = 0) afterwards.
+- AFT_XXX-C values are signed int16 (`0x8000` and up are negative). Zero
+  it with `DEV_CMD 0x08` (software tare, RAM); the structured ZERO
+  writes the sensor's own flash. After a command, `DEV_STATUS` OK only
+  means "sent" — confirm in `AFT_LINK` (`0x021E`).
 - **RS485 multi-drop**: several grippers can share one physical bus if
   each has a distinct `CFG_MB_ADDR`, but only one Modbus transaction may
   be in flight on the wire at a time. All three SDKs in this repo share
@@ -946,6 +1094,8 @@ if blocking:
 # device info: read(0x01C4, 8) -> version/hash/flags/build time (fw >= v1.25, else all 0)
 #              read(0x01C0, 4) product code + read(0x0188, 2) -> NNNN, YYMM (fw >= v1.24)
 # tactile (CFG_SENSOR_TYPE=2): read(0x0220, 16) -> per tip [status][posX][posY][fx][fy][fz][rate][rxcnt]
+# AFT F/T (CFG_SENSOR_TYPE=1): read(0x0210, 16) -> [status][Fx Fy Fz: N*100][Tx Ty Tz: Nm*1000] (tip 1),
+#              same 7 for tip 2, [AFT_LINK][AFT_ERRWORD] (fw >= v1.26 for AFT_XXX-C); int16, valid = status & 0x0100
 # fast poll (fw >= v1.15): read(0x02C0, 10) -> status, gPO, gCU, both tips' tactile (8-bit), gFLT
 ```
 
@@ -994,7 +1144,13 @@ you need to write a client in a fourth language:
   forces is still to come.
 - **No SDK helpers for force control or the AFT F/T sensor**: use the raw
   register calls (`0x01A0~`, `0x0210~`) as summarized above; parameters
-  and tuning are in the Protocol Manual.
+  and tuning are in the Protocol Manual. The register mirrors
+  (`registers.hpp` / `registers.py`) do not list the `0x0210~` block yet —
+  use the addresses from [AFT F/T sensor](#aft-ft-sensor--aft-ft-센서-0x02100x021f).
+- **AFT_XXX-C** (firmware v1.26.0): receiving and reading the six values
+  was confirmed on hardware with an AFT_RBY2-C in CAN 2.0 mode. The sensor
+  commands (SET_OUTPUT, SET_RATE, ZERO, FACTORY_RESET) and the FD output
+  formats have not been checked on hardware one by one yet.
 - **ROS2 driver**: one node drives one gripper on one port. Several
   grippers on one RS485 bus need your own node (or several adapters).
 - **Python SDK**: its polling rate has not been measured. pymodbus retries
