@@ -413,7 +413,7 @@ One Modbus transaction (function `0x03`, 10 registers) at `0x02C0` — the
 fast-poll block (§7.6, firmware protocol ≥ v1.15.0). Returns `FastState`:
 `gSTA`/`gOBJ`/`gACT`/`gHOM`/`gGTO`, `gPO`, `gCU`, `gFLT` and both
 fingertips' tactile resultant in 8-bit resolution (full scale per field:
-Px 32 mm, Py ±12.5 mm, Fx/Fy ±35 N, Fz 70 N). The
+Px ±16 mm, Py ±12.5 mm, Fx/Fy ±35 N, Fz 70 N; protocol ≥ v1.27.0). The
 firmware rewrites the block atomically, so the result is one consistent
 snapshot. ≈ 4 ms per call at 115200 baud (measured max ≈ 248 Hz). Use it
 for high-rate loops; use `readState()` when you need `gSP`, `gV`,
@@ -522,18 +522,18 @@ enum class TactileLink : uint8_t {
     NotDetected, Disconnected, RawStream, Waiting, Live
 };
 
-struct TactileTip {                 // one fingertip, gripper frame (fw >= v1.18.0)
+struct TactileTip {                 // one fingertip, gripper frame (fw >= v1.27.0)
     bool     valid, saturated, timeout, connected,
              rawStream, contact, seen, rawFresh;   // TACT_STATUS bits
-    float    posX;     // mm, 0..32 from the wrist-side edge of the cell area toward the fingertip; 0 = no contact point
-    float    posY;     // mm, +-12.5 across the pad width
-    float    fx, fy;   // N, shear along +posX / +posY (after tare)
+    float    posX;     // mm, +-16 from the cell-area centre, + = toward the wrist; NaN = no contact point
+    float    posY;     // mm, +-12.5 across the pad width, + = left; NaN = no contact point
+    float    fx, fy;   // N, shear along +posX / +posY (toward the wrist / left, after tare)
     float    fz;       // N, normal force, > 0 = pressing (after tare)
     uint16_t rateHz;   // result frames in the last second (~100); readTactile() only
     uint16_t rxCount;  // result frames since boot (wraps); readTactile() only
     uint16_t status;   // raw TACT_STATUS word
     TactileLink link() const;
-    bool        hasContactPoint() const;   // valid && posX > 0
+    bool        hasContactPoint() const;   // valid && posX/posY not NaN
 };
 using TactilePair = std::array<TactileTip, 2>;   // [0] right (tip 1), [1] left (tip 2)
 
@@ -646,21 +646,26 @@ in the Protocol Manual §3.
 
 Active when `CFG_SENSOR_TYPE` (`0x018A`) = 2 — write it, then `DEV_CMD
 0x02 SAVE_CONFIG` (applies immediately, no reboot). Firmware protocol
-≥ v1.13.0; the gripper-frame coordinates below need ≥ v1.18.0. Tip 1 =
-right finger, tip 2 = left.
+≥ v1.13.0; the gripper-frame coordinates below need ≥ v1.27.0. Tip 1 =
+right finger, tip 2 = left. Frame (pad contact face seen head-on, fingertip
+end up): origin = centre of the 32 mm cell area, +X = toward the wrist,
++Y = left; forces use the same axes. Firmware v1.18.0 – v1.26.0 used
+another frame (X 0..3200 from the wrist-side edge toward the fingertip,
++Y right, 0 = no contact point, Fx/Fy opposite to X/Y).
 
 | Tip 1 | Tip 2 | Field | Description |
 |-------|-------|-------|-------------|
 | `0x0220` | `0x0228` | `TACT_STATUS` | b8 valid · b9 saturated · b10 timeout · b11 connected · b12 raw_stream · b13 contact (Fz ≥ 0.5 N) · b14 seen · b15 raw_fresh; low byte = 2 |
-| `0x0221` | `0x0229` | `POSX` | int16 [mm × 100], 0..3200 from the wrist-side edge of the cell area toward the fingertip; 0 = no contact point |
-| `0x0222` | `0x022A` | `POSY` | int16 [mm × 100], ±1250 across the pad width |
-| `0x0223` | `0x022B` | `FX` | int16 [N × 100] shear along +X, after tare |
-| `0x0224` | `0x022C` | `FY` | int16 [N × 100] shear along +Y, after tare |
+| `0x0221` | `0x0229` | `POSX` | int16 [mm × 100], ±1600, + = toward the wrist (fingertip end = −1600); −32768 (`0x8000`) = no contact point |
+| `0x0222` | `0x022A` | `POSY` | int16 [mm × 100], ±1250 across the pad width, + = left; −32768 = no contact point |
+| `0x0223` | `0x022B` | `FX` | int16 [N × 100] shear along +X (toward the wrist), after tare |
+| `0x0224` | `0x022C` | `FY` | int16 [N × 100] shear along +Y (left), after tare |
 | `0x0225` | `0x022D` | `FZ` | int16 [N × 100] normal, positive = pressing, after tare |
 | `0x0226` | `0x022E` | `RATE` | result frames in the last second [Hz] (≈ 100) |
 | `0x0227` | `0x022F` | `RXCNT` | result frames since boot (wraps) |
 
-Values are 0 while `valid` = 0. Related registers:
+While `valid` = 0 the forces read 0 and `POSX`/`POSY` read −32768
+(no contact point); the SDK returns NaN positions then. Related registers:
 
 | PDU addr | Field | Description |
 |----------|-------|-------------|
@@ -679,7 +684,7 @@ cycles.
 | `0x02C0` | 0 | `STATUS` (same bits as `0x0200`) |
 | `0x02C1` | 0 | `gPO` |
 | `0x02C2` | 0 | `gCU` |
-| `0x02C3` / `0x02C6` | right / left `Px8` (uint8) | `Py8` (int8) |
+| `0x02C3` / `0x02C6` | right / left `Px8` (int8) | `Py8` (int8) |
 | `0x02C4` / `0x02C7` | `Fx8` (int8) | `Fy8` (int8) |
 | `0x02C5` / `0x02C8` | `Fz8` (uint8) | `status8` = `TACT_STATUS >> 8` |
 | `0x02C9` | 0 | `gFLT` |
@@ -687,10 +692,12 @@ cycles.
 `status8` bits: b0 valid · b1 saturated · b2 timeout · b3 connected ·
 b4 raw_stream · b5 contact · b6 seen · b7 raw_fresh (the `TACT_STATUS`
 bits of §7.5, shifted down by 8). 8-bit tactile values: each field's full
-scale maps to the end of its byte range — `Px8` 0..255 ↔ 0..32 mm, `Py8`
+scale maps to the end of its byte range — `Px8` ±127 ↔ ±16 mm, `Py8`
 ±127 ↔ ±12.5 mm, `Fx8`/`Fy8` ±127 ↔ ±35 N (provisional), `Fz8` 0..255 ↔
 0..70 N (protocol ≥ v1.19.0); out-of-range values clamp and set
-`saturated`. `Px8` is uint8 since v1.18.0 (int8 before). With
+`saturated`. `Px8` = `Py8` = `0x80` = no contact point (also on tips
+with `valid` = 0). `Px8` is int8 ±16 mm since v1.27.0 (uint8 0..32 mm
+from the wrist-side edge in v1.18.0 – v1.26.0). With
 `CFG_SENSOR_TYPE` ≠ 2 the six tactile words are 0. Packing rules, a
 decoded wire example, PLC addressing and polling timing per baud rate:
 [root README](../README.md#fast-poll-block--고속-폴링-블록-0x02c00x02c9).
@@ -824,7 +831,8 @@ optionally zeroes them (`--zero`), then streams both tips at 20 Hz:
 ```cpp
 const auto tips = g.readTactile();          // {right, left}
 if (tips[0].link() == aidin::TactileLink::Live) {
-    std::cout << tips[0].posX << " mm, Fz=" << tips[0].fz << " N\n";
+    if (tips[0].hasContactPoint()) std::cout << tips[0].posX << " mm, ";
+    std::cout << "Fz=" << tips[0].fz << " N\n";
 }
 g.tactileZero();                            // pads untouched
 ```
@@ -935,4 +943,4 @@ with `python/aidin_gripper/registers.py`.
 
 ---
 
-*Manual revision: 1.2 — matches SDK [`v1.2.0`](CMakeLists.txt) and firmware Spec v1.25.1.*
+*Manual revision: 1.3 — matches SDK [`v1.3.0`](CMakeLists.txt) and firmware Spec v1.27.0.*

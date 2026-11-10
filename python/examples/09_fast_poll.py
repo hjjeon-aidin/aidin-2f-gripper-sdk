@@ -3,9 +3,9 @@
 One FC03 read of 10 registers returns gripper status, position, current,
 fault AND both fingertips' tactile resultant as one consistent snapshot
 (~4 ms per read at 115200 bps). Tactile values are 8-bit compressed over
-each field's full scale (Px 32 mm, Py +-12.5 mm, Fx/Fy +-35 N, Fz 70 N).
-Needs firmware protocol >= v1.19.0 for the tactile scales; tactile fields
-are 0 unless the sensor type is tactile.
+each field's full scale (Px +-16 mm, Py +-12.5 mm, Fx/Fy +-35 N, Fz 70 N).
+Needs firmware protocol >= v1.27.0 for the tactile scales and frame; tactile
+fields are 0 / no contact point unless the sensor type is tactile.
 
 Usage:
     python 09_fast_poll.py /dev/ttyUSB0          # poll as fast as possible until CTRL+C
@@ -44,7 +44,7 @@ def main() -> int:
                 now = time.monotonic()
                 if now - t0 >= 0.5:          # print twice a second, keep polling flat out
                     print(f"{n / (now - t0):6.1f} Hz  pos={s.position:3d} cur={s.current:3d} "
-                          f"flt={s.fault}  R={s.right}  L={s.left}", end="\r", flush=True)
+                          f"flt={s.fault}  R={s.right}  L={s.left}        ", end="\r", flush=True)
                     n, t0 = 0, now
             print("\nStopped.")
     except Exception as e:

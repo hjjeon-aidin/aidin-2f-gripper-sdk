@@ -138,17 +138,24 @@ DEV_STATUS_OK:      Final[int] = 0x02
 DEV_STATUS_ERROR:   Final[int] = 0x03
 
 # --------------- 3-axis tactile sensor (CFG_SENSOR_TYPE = 2) ---------------
-# Contact resultant per fingertip (protocol v1.13.0, gripper frame v1.18.0).
+# Contact resultant per fingertip (protocol v1.13.0, gripper frame v1.27.0).
 # Tip 1 = RIGHT finger, tip 2 = LEFT finger. Read both tips as one 16-word block
 # from TACT1_STATUS. Per tip: [status][posX][posY][fx][fy][fz][rate][rxcnt]
-#   pos [mm x 100]: X = 0..3200 from the wrist-side edge of the cell area toward
-#                   the fingertip, 0 = no contact point; Y = +-1250 across the pad
-#   f   [N x 100] after tare, fz > 0 = pressing; rate [Hz] (~100); rxcnt wraps
+#   Frame (pad contact face seen head-on, fingertip end up): origin = centre of
+#   the 32 mm cell area, +X = toward the wrist, +Y = left.
+#   pos [mm x 100]: X = +-1600 (fingertip end = -1600, contact points +-1333),
+#                   Y = +-1250 (contact points +-938);
+#                   -32768 (0x8000) in both = no contact point (0 = centre)
+#   f   [N x 100] after tare, same axes: +fx = toward the wrist, +fy = left,
+#                   fz > 0 = pressing; rate [Hz] (~100); rxcnt wraps
+# Firmware <= v1.26.0 used another frame: X = 0..3200 from the wrist-side edge
+# toward the fingertip, +Y = right, 0 = no contact point, Fx/Fy opposite to X/Y.
 TACT1_STATUS:   Final[int] = 0x0220   # right finger (tip 1), 0x0220..0x0227
 TACT2_STATUS:   Final[int] = 0x0228   # left finger (tip 2),  0x0228..0x022F
 TACT_TIP_WORDS: Final[int] = 8
 TACT_POS_SCALE:   Final[float] = 100.0  # register / 100 = mm
 TACT_FORCE_SCALE: Final[float] = 100.0  # register / 100 = N
+TACT_POS_NONE:    Final[int] = -32768   # POSX/POSY 0x8000 = no contact point (v1.27.0)
 
 # TACT_STATUS bitfield (0x0220 / 0x0228). Low byte = active sensor type (2).
 TACT_ST_TYPE_MASK:  Final[int] = 0x00FF
@@ -196,14 +203,18 @@ TACT_TIP_BOTH:  Final[int] = 0x03
 #   0x02C3..0x02C5 right tip: (Px8,Py8) (Fx8,Fy8) (Fz8,status8)   high byte first
 #   0x02C6..0x02C8 left tip:  same layout
 #   0x02C9 gFLT
-# Px8/Fz8 are uint8, Py8/Fx8/Fy8 int8. Each field's full scale maps to the end
-# of its byte range (protocol v1.19.0): uint8 255, int8 +-127 (-128 unused):
-#   Px = byte * 32 / 255 mm        Fz     = byte * 70 / 255 N
+# Fz8 is uint8, Px8/Py8/Fx8/Fy8 int8. Each field's full scale maps to the end
+# of its byte range (protocol v1.19.0): uint8 255, int8 +-127:
+#   Px = int8 * 16 / 127 mm        Fz     = byte * 70 / 255 N
 #   Py = int8 * 12.5 / 127 mm      Fx, Fy = int8 * 35 / 127 N
-# status8 = TACT_STATUS >> 8. Px8 is uint8 since v1.18.0 (int8 before).
+# Same frame as TACT1_STATUS above. Px8 = Py8 = 0x80 (-128) = no contact point
+# (also on tips with valid = 0); force fields never use -128.
+# status8 = TACT_STATUS >> 8. Px8 is int8 +-16 mm since v1.27.0 (uint8 0..32 mm
+# from the wrist-side edge in v1.18.0..v1.26.0).
 FAST_BLOCK: Final[int] = 0x02C0
 FAST_WORDS: Final[int] = 10
-FAST_PX_MAX:  Final[float] = 32.0   # mm,  uint8 0..255
+FAST_POS_NONE: Final[int] = 0x80    # Px8/Py8 = no contact point (v1.27.0)
+FAST_PX_MAX:  Final[float] = 16.0   # mm,  int8 +-127
 FAST_PY_MAX:  Final[float] = 12.5   # mm,  int8 +-127
 FAST_FXY_MAX: Final[float] = 35.0   # N,   int8 +-127 (provisional: half of Fz)
 FAST_FZ_MAX:  Final[float] = 70.0   # N,   uint8 0..255

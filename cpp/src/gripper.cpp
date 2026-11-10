@@ -141,12 +141,15 @@ TactileTip tactileFlags(uint16_t st) {
 }
 
 // One tip of the fast block: (Px8,Py8) (Fx8,Fy8) (Fz8,status8), high byte first.
+// posX/posY stay NaN (TactileTip default) when Px8 = 0x80 (no contact point).
 TactileTip fastTip(const uint16_t* w) {
     TactileTip t = tactileFlags(static_cast<uint16_t>((w[2] & 0xFF) << 8));  // status8 = TACT_STATUS[15:8]
     const auto s8 = [](uint16_t b) { return static_cast<float>(static_cast<int8_t>(b & 0xFF)); };
     const auto u8 = [](uint16_t b) { return static_cast<float>(b & 0xFF); };
-    t.posX = u8(w[0] >> 8) * reg::FAST_PX_MAX  / 255.0f;
-    t.posY = s8(w[0])      * reg::FAST_PY_MAX  / 127.0f;
+    if (t.valid && ((w[0] >> 8) & 0xFF) != reg::FAST_POS_NONE) {
+        t.posX = s8(w[0] >> 8) * reg::FAST_PX_MAX / 127.0f;
+        t.posY = s8(w[0])      * reg::FAST_PY_MAX / 127.0f;
+    }
     t.fx   = s8(w[1] >> 8) * reg::FAST_FXY_MAX / 127.0f;
     t.fy   = s8(w[1])      * reg::FAST_FXY_MAX / 127.0f;
     t.fz   = u8(w[2] >> 8) * reg::FAST_FZ_MAX  / 255.0f;
@@ -542,8 +545,11 @@ TactilePair Gripper::readTactile() {
     for (size_t i = 0; i < tips.size(); ++i) {
         const uint16_t* w = &buf[i * reg::TACT_TIP_WORDS];
         TactileTip t = tactileFlags(w[0]);
-        t.posX    = s16(w[1]) / reg::TACT_POS_SCALE;
-        t.posY    = s16(w[2]) / reg::TACT_POS_SCALE;
+        // POSX = 0x8000 = no contact point: posX/posY stay NaN (TactileTip default).
+        if (t.valid && static_cast<int16_t>(w[1]) != reg::TACT_POS_NONE) {
+            t.posX = s16(w[1]) / reg::TACT_POS_SCALE;
+            t.posY = s16(w[2]) / reg::TACT_POS_SCALE;
+        }
         t.fx      = s16(w[3]) / reg::TACT_FORCE_SCALE;
         t.fy      = s16(w[4]) / reg::TACT_FORCE_SCALE;
         t.fz      = s16(w[5]) / reg::TACT_FORCE_SCALE;

@@ -410,9 +410,10 @@ class Gripper:
         Gripper status + position + current + fault and both fingertips'
         tactile resultant, refreshed atomically by the firmware, so the reply
         is one consistent snapshot (~4 ms at 115200 bps). Tactile values are
-        8-bit compressed over each field's full scale (Px 32 mm, Py +-12.5 mm,
-        Fx/Fy +-35 N, Fz 70 N). Firmware protocol >= v1.15.0; the scales
-        decode correctly only with >= v1.19.0.
+        8-bit compressed over each field's full scale (Px +-16 mm, Py +-12.5 mm,
+        Fx/Fy +-35 N, Fz 70 N). Firmware protocol >= v1.15.0; the tactile
+        values decode correctly only with >= v1.27.0 (signed Px, 0x80 = no
+        contact point).
         """
         regs = self._read_block(reg.FAST_BLOCK, reg.FAST_WORDS)
         st = regs[0]
@@ -455,17 +456,20 @@ class Gripper:
     def read_tactile(self) -> tuple[TactileTip, TactileTip]:
         """Read both fingertips' contact resultant (0x0220..0x022F, one transaction).
 
-        Returns ``(right, left)`` = (tip 1, tip 2): contact point [mm] and
-        Fx/Fy/Fz [N], 0.01 resolution, plus the per-tip link state. With
-        another sensor type every tip reads NOT_DETECTED with zero values.
+        Returns ``(right, left)`` = (tip 1, tip 2): contact point [mm]
+        (``None`` = no contact point, see ``TactileTip``) and Fx/Fy/Fz [N],
+        0.01 resolution, plus the per-tip link state. Gripper frame of
+        firmware >= v1.27.0. With another sensor type every tip reads
+        NOT_DETECTED with zero forces and no contact point.
         """
         regs = self._read_block(reg.TACT1_STATUS, 2 * reg.TACT_TIP_WORDS)
         tips = []
         for o in (0, reg.TACT_TIP_WORDS):
+            has_pos = _s16(regs[o + 1]) != reg.TACT_POS_NONE   # 0x8000 = no contact point
             tips.append(_tactile_tip(
                 regs[o],
-                _s16(regs[o + 1]) / reg.TACT_POS_SCALE,
-                _s16(regs[o + 2]) / reg.TACT_POS_SCALE,
+                _s16(regs[o + 1]) / reg.TACT_POS_SCALE if has_pos else None,
+                _s16(regs[o + 2]) / reg.TACT_POS_SCALE if has_pos else None,
                 _s16(regs[o + 3]) / reg.TACT_FORCE_SCALE,
                 _s16(regs[o + 4]) / reg.TACT_FORCE_SCALE,
                 _s16(regs[o + 5]) / reg.TACT_FORCE_SCALE,
@@ -675,10 +679,14 @@ def _object_state(st: int) -> ObjectState:
     }.get(st & reg.GOBJ_MASK, ObjectState.MOVING)
 
 
-def _tactile_tip(status: int, pos_x: float, pos_y: float, fx: float, fy: float,
-                 fz: float, rate_hz: int = 0, rx_count: int = 0) -> TactileTip:
+def _tactile_tip(status: int, pos_x: Optional[float], pos_y: Optional[float],
+                 fx: float, fy: float, fz: float,
+                 rate_hz: int = 0, rx_count: int = 0) -> TactileTip:
+    valid = bool(status & reg.TACT_ST_VALID)
+    if not valid or pos_x is None or pos_y is None:   # no contact point
+        pos_x = pos_y = None
     return TactileTip(
-        valid      = bool(status & reg.TACT_ST_VALID),
+        valid      = valid,
         saturated  = bool(status & reg.TACT_ST_SATURATED),
         timeout    = bool(status & reg.TACT_ST_TIMEOUT),
         connected  = bool(status & reg.TACT_ST_CONNECTED),
@@ -693,10 +701,11 @@ def _tactile_tip(status: int, pos_x: float, pos_y: float, fx: float, fy: float,
 
 def _fast_tip(w: list[int]) -> TactileTip:
     """Decode one tip of the fast block: (Px8,Py8) (Fx8,Fy8) (Fz8,status8)."""
+    has_pos = ((w[0] >> 8) & 0xFF) != reg.FAST_POS_NONE              # Px8 0x80 = no contact point
     return _tactile_tip(
         (w[2] & 0xFF) << 8,                                          # status8 = TACT_STATUS[15:8]
-        round((w[0] >> 8) * reg.FAST_PX_MAX / 255, 2),               # Px8 uint8
-        round(_s8(w[0] & 0xFF) * reg.FAST_PY_MAX / 127, 2),          # Py8 int8
+        round(_s8((w[0] >> 8) & 0xFF) * reg.FAST_PX_MAX / 127, 2) if has_pos else None,  # Px8 int8
+        round(_s8(w[0] & 0xFF) * reg.FAST_PY_MAX / 127, 2) if has_pos else None,         # Py8 int8
         round(_s8(w[1] >> 8) * reg.FAST_FXY_MAX / 127, 2),           # Fx8 int8
         round(_s8(w[1] & 0xFF) * reg.FAST_FXY_MAX / 127, 2),         # Fy8 int8
         round((w[2] >> 8) * reg.FAST_FZ_MAX / 255, 2),               # Fz8 uint8

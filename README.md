@@ -22,10 +22,10 @@ AIDIN 2지 BLDC 그리퍼용 호스트 소프트웨어 모음입니다. USB-RS48
 
 ## Compatibility / 호환성
 
-SDK **1.2.0** (C++, Python and ROS2 alike) works with **any firmware**.
+SDK **1.3.0** (C++, Python and ROS2 alike) works with **any firmware**.
 Features newer than the firmware are simply unavailable — they read 0,
 return the Modbus exception "illegal address", or answer `DEV_STATUS` =
-ERROR. **Recommended firmware: 1.25.1.** Firmware versions are the protocol
+ERROR. **Recommended firmware: 1.27.0** (tactile coordinate frame of SDK 1.3.0). Firmware versions are the protocol
 Spec versions of the *Aidin Gripper Modbus RTU Protocol Manual* (Rev 2.6
 covers Spec v1.25.1). Read the running version with
 `read_firmware_info()` / `readFirmwareInfo()` / `~/get_device_info` —
@@ -36,9 +36,9 @@ firmware ≤ v1.24 reports 0.0.0.
 | Activate, home, move, stop, status, emergency release | any |
 | Trajectory limits (`set_traj_limits`) | ≥ 1.11.0 |
 | Full init / stroke calibration (`ACTION` = `0xA5`) | ≥ 1.12.0 |
-| Fast-poll block `0x02C0` | ≥ 1.15.0 (8-bit tactile scales ≥ 1.19.0) |
+| Fast-poll block `0x02C0` | ≥ 1.15.0 (tactile values as decoded by this SDK: ≥ 1.27.0) |
 | Baud rate change | ≥ 1.16.0 (`REBOOT` to apply it: ≥ 1.20.0) |
-| Tactile sensor, gripper-frame coordinates | ≥ 1.18.0 |
+| Tactile sensor, gripper-frame coordinates as decoded by this SDK (centre origin, +X toward the wrist, +Y left, `0x8000` = no contact point) | ≥ 1.27.0 (1.18.0 – 1.26.0 used another frame — [details](#tactile-sensor--촉각-센서-0x0220)) |
 | Fault recovery with `activate()` alone | ≥ 1.23.0 ([details](#fault-deactivation--폴트-시-비활성화)) |
 | Serial number `read_serial_number()` | ≥ 1.24.0 (older: the `YYMM-NNNN` part only) |
 | Firmware info `read_firmware_info()` | ≥ 1.25.0 (older: 0.0.0) |
@@ -591,7 +591,7 @@ sensor type.
 
 ### Tactile sensor / 촉각 센서 (`0x0220~`)
 
-Firmware protocol ≥ v1.13.0 (gripper-frame coordinates below: ≥ v1.18.0).
+Firmware protocol ≥ v1.13.0 (gripper-frame coordinates below: ≥ v1.27.0).
 Each fingertip's 3-axis tactile sensor (23 cells) sends one **contact
 resultant** at 100 Hz over CAN FD: where the contact is and how hard it
 pushes. The firmware relays it as 8 registers per tip.
@@ -602,19 +602,33 @@ pushes. The firmware relays it as 8 registers per tip.
 | Offset (tip 1 / tip 2) | Field | Type | Meaning |
 |---|---|---|---|
 | `0x0220` / `0x0228` | `TACT_STATUS` | bitfield | link / validity bits — table below. Low byte = sensor type (2) |
-| `0x0221` / `0x0229` | `POSX` | int16 | contact point X [mm × 100]: **0..3200 from the wrist-side edge of the cell area toward the fingertip. 0 = no contact point** |
-| `0x0222` / `0x022A` | `POSY` | int16 | contact point Y [mm × 100]: ±1250 across the pad width (centre = 0) |
-| `0x0223` / `0x022B` | `FX` | int16 | shear force [N × 100] along +X (toward the fingertip), after tare |
-| `0x0224` / `0x022C` | `FY` | int16 | shear force [N × 100] along +Y, after tare |
+| `0x0221` / `0x0229` | `POSX` | int16 | contact point X [mm × 100]: **±1600 from the centre of the cell area, + = toward the wrist** (fingertip end = −1600). **−32768 (`0x8000`) = no contact point** |
+| `0x0222` / `0x022A` | `POSY` | int16 | contact point Y [mm × 100]: ±1250 across the pad width, **+ = left** (centre = 0). −32768 = no contact point |
+| `0x0223` / `0x022B` | `FX` | int16 | shear force [N × 100] along +X (toward the wrist), after tare |
+| `0x0224` / `0x022C` | `FY` | int16 | shear force [N × 100] along +Y (left), after tare |
 | `0x0225` / `0x022D` | `FZ` | int16 | normal force [N × 100], **positive = pressing**, after tare |
 | `0x0226` / `0x022E` | `RATE` | uint16 | result frames received in the last second [Hz] (≈ 100 when healthy) |
 | `0x0227` / `0x022F` | `RXCNT` | uint16 | result frames since boot (wraps at 65535) |
 
-`mm = POS / 100`, `N = F / 100`. While `valid` = 0 every value reads 0.
-With `valid` = 1 but a light touch (Fz < ~1 N) there is no contact point
-and `POSX = POSY = 0` — a real contact point is always `POSX` ≥ ~2.7 mm,
-so 0 never collides with a valid one. The pad is 50 × 25 mm; the cells
-cover the 32 mm toward the fingertip.
+`mm = POS / 100`, `N = F / 100`. While `valid` = 0 the forces read 0
+and `POSX = POSY = −32768`. With `valid` = 1 but a light touch (Fz < ~1 N)
+there is no contact point either: `POSX = POSY = −32768`. In both cases
+the SDKs return no position (`None` in Python, NaN in C++ and ROS2;
+Python `has_contact_point` / C++ `hasContactPoint()` = false). **0 is the centre
+of the cell area, not "none"**; real contact points lie within
+X ±13.33 mm, Y ±9.38 mm.
+
+**Coordinate frame / 좌표계** — look at the pad's contact face head-on
+with the fingertip end up. The pad is 50 × 25 mm; the cells cover the
+32 mm toward the fingertip, and the origin is the centre of that cell
+area (16 mm from the fingertip end, centre of the width). **+X points
+toward the wrist** (fingertip end = −16 mm, wrist-side edge of the cell
+area = +16 mm) and **+Y to the left**. Fx / Fy use the same axes: +Fx
+pushes the pad toward the wrist, +Fy to the left. Fz > 0 = pressing.
+
+패드 접촉면을 정면으로, 끝단을 위로 보았을 때: 원점 = 셀 영역(끝단 쪽 32 mm)
+중심, **+X = 손목 방향, +Y = 왼쪽**. 힘 Fx/Fy 도 같은 축입니다.
+작용점이 없으면 `POSX = POSY = −32768` 이며, 0 은 셀 영역 중심입니다.
 
 **`TACT_STATUS` bits**
 
@@ -664,13 +678,19 @@ cover the 32 mm toward the fingertip.
 | Software tare | `g.sensor_zero()` | `g.sensorZero()` | `/dev_cmd` `cmd: 8` |
 | Raw 69 channels | `g.read_tactile_raw(reg.TACT_TIP_LEFT)` | `g.readTactileRaw(reg::TACT_TIP_LEFT)` | — |
 
-Firmware older than v1.18.0 reports positions in the sensor's own frame
-(centre origin, rotated 180°). Open points on the shear-force sign and the
-right-hand zero command: [Known limitations](#known-limitations--알려진-제한).
+⚠ **Firmware v1.18.0 – v1.26.0 used another frame**: `POSX` 0..3200 from
+the wrist-side edge of the cell area toward the fingertip, +Y to the
+right, `POSX = POSY = 0` = no contact point, and Fx / Fy pointed opposite
+to the position axes. This SDK decodes the v1.27.0 frame; with older
+firmware it reads "no contact point" (0) as a point at the centre.
+Firmware older than v1.18.0 reports positions in the sensor's own
+coordinates. Open points on shear-force accuracy and the right-hand zero
+command: [Known limitations](#known-limitations--알려진-제한).
 
 ### Fast-poll block / 고속 폴링 블록 (`0x02C0~0x02C9`)
 
-Firmware protocol ≥ v1.15.0 (the 8-bit tactile scale below: ≥ v1.19.0).
+Firmware protocol ≥ v1.15.0 (the 8-bit tactile scales below: ≥ v1.19.0;
+signed `Px` and the coordinate frame: ≥ v1.27.0).
 A **read-only copy** of the essentials —
 gripper status, position, current, fault and both fingertips' tactile
 resultant — packed so **one FC03 read of 10 registers** returns them all.
@@ -704,18 +724,20 @@ R = right finger (tip 1), L = left finger (tip 2). PLC "4x" addresses:
 | `STATUS` | `0x02C0` [7:0] | bits | — | — | `0x0200` | `gACT` · `gHOM` · `gGTO` · `gSTA` · `gOBJ`, same bits as [`0x0200`](#status-bits-read-0x0200) |
 | `gPO` | `0x02C1` [7:0] | uint8 | — | 0..255 | `0x0203` | actual position, 0 = open, 255 = closed |
 | `gCU` | `0x02C2` [7:0] | uint8 | — | 0..255 | `0x0204` | actual motor current (normalized) |
-| `Px` | `0x02C3` / `0x02C6` [15:8] | uint8 | 32/255 ≈ 0.1255 mm | 0 .. 32.0 mm | `POSX` `0x0221` / `0x0229` | contact point X, from the wrist-side edge of the cell area toward the fingertip; **0 = no contact point** |
-| `Py` | `0x02C3` / `0x02C6` [7:0] | int8 | 12.5/127 ≈ 0.0984 mm | −12.5 .. +12.5 mm | `POSY` `0x0222` / `0x022A` | contact point Y across the pad width (centre = 0) |
-| `Fx` | `0x02C4` / `0x02C7` [15:8] | int8 | 35/127 ≈ 0.2756 N | −35 .. +35 N ⚠ | `FX` `0x0223` / `0x022B` | shear force along +X, after tare |
-| `Fy` | `0x02C4` / `0x02C7` [7:0] | int8 | 35/127 ≈ 0.2756 N | −35 .. +35 N ⚠ | `FY` `0x0224` / `0x022C` | shear force along +Y, after tare |
+| `Px` | `0x02C3` / `0x02C6` [15:8] | int8 | 16/127 ≈ 0.1260 mm | −16.0 .. +16.0 mm | `POSX` `0x0221` / `0x0229` | contact point X from the centre of the cell area, + = toward the wrist; **`0x80` = no contact point** |
+| `Py` | `0x02C3` / `0x02C6` [7:0] | int8 | 12.5/127 ≈ 0.0984 mm | −12.5 .. +12.5 mm | `POSY` `0x0222` / `0x022A` | contact point Y across the pad width, + = left (centre = 0); `0x80` = no contact point |
+| `Fx` | `0x02C4` / `0x02C7` [15:8] | int8 | 35/127 ≈ 0.2756 N | −35 .. +35 N ⚠ | `FX` `0x0223` / `0x022B` | shear force along +X (toward the wrist), after tare |
+| `Fy` | `0x02C4` / `0x02C7` [7:0] | int8 | 35/127 ≈ 0.2756 N | −35 .. +35 N ⚠ | `FY` `0x0224` / `0x022C` | shear force along +Y (left), after tare |
 | `Fz` | `0x02C5` / `0x02C8` [15:8] | uint8 | 70/255 ≈ 0.2745 N | 0 .. 70 N | `FZ` `0x0225` / `0x022D` | normal force, positive = pressing, after tare |
 | `status8` | `0x02C5` / `0x02C8` [7:0] | bits | — | — | `TACT_STATUS` [15:8] | tactile status: valid · saturated · timeout · connected · raw_stream · contact · seen · raw_fresh — see [below](#tactile-status-status8) |
 | `gFLT` | `0x02C9` [7:0] | uint8 | — | 0..11 | `0x0201` | current fault code ([fault codes](#fault-codes--폴트-코드-gflt--gflto)); the latched `gFLTO` is not in the block |
 
 - Modbus sends the high byte first, so each tip's bytes arrive as
   `Px, Py, Fx, Fy, Fz, status8`. Unused high bytes are 0.
-- A tip without a valid reading has all five values at 0. With
-  `CFG_SENSOR_TYPE` ≠ 2 all six tactile words are 0.
+- A tip without a valid reading has `Fx` = `Fy` = `Fz` = 0 and
+  `Px` = `Py` = `0x80` (no contact point). With `CFG_SENSOR_TYPE` ≠ 2 all
+  six tactile words are 0 (`status8` `valid` = 0, so the SDKs report no
+  contact point).
 - Reading 9 registers (`0x02C0~0x02C8`) skips `gFLT`.
 - Each field's full scale maps to the end of its byte range, so the
   resolution differs per field ([details](#tactile-8-bit-encoding--촉각-8비트-압축)).
@@ -732,7 +754,7 @@ step — therefore differs per field:
 
 | Field | Full scale | Source at full scale | Byte | Byte range | Resolution |
 |---|---|---|---|---|---|
-| `Px` | 32.0 mm (cell area) | 3200 | uint8 | 0 .. 255 | 32/255 ≈ 0.1255 mm |
+| `Px` | ±16.0 mm (cell area) | ±1600 | int8 | −127 .. +127 | 16/127 ≈ 0.1260 mm |
 | `Py` | ±12.5 mm (pad width) | ±1250 | int8 | −127 .. +127 | 12.5/127 ≈ 0.0984 mm |
 | `Fx`, `Fy` | ±35 N ⚠ | ±3500 | int8 | −127 .. +127 | 35/127 ≈ 0.2756 N |
 | `Fz` | 70 N | 7000 | uint8 | 0 .. 255 | 70/255 ≈ 0.2745 N |
@@ -748,33 +770,37 @@ step — therefore differs per field:
 
 ```
 v    = source register                      # int16, ×100 scale
-v    = max(v, 0)                            # Px and Fz only
-n    = v × qmax                             # qmax = 255 (Px, Fz) · 127 (Py, Fx, Fy); fits int32
+if Px/Py and POSX/POSY = −32768:            # no contact point
+    byte = 0x80;  done
+v    = max(v, 0)                            # Fz only
+n    = v × qmax                             # qmax = 255 (Fz) · 127 (Px, Py, Fx, Fy); fits int32
 q    = (n >= 0) ? (n + fs/2) / fs           # ÷ full scale, round half away from zero
                 : (n - fs/2) / fs           #   (C integer division truncates toward zero)
-q    = clamp(q, lo, qmax)                   # Px, Fz: lo = 0 · Py, Fx, Fy: lo = −qmax
+q    = clamp(q, lo, qmax)                   # Fz: lo = 0 · Px, Py, Fx, Fy: lo = −qmax
 byte = q & 0xFF
 ```
 
-`fs` is the source value at full scale: 3200 (Px) · 1250 (Py) ·
-3500 (Fx, Fy) · 7000 (Fz). −128 (`0x80`) is never produced, so the signed
-fields are symmetric.
+`fs` is the source value at full scale: 1600 (Px) · 1250 (Py) ·
+3500 (Fx, Fy) · 7000 (Fz). Values never encode to −128 (`0x80`), so the
+signed fields are symmetric; in `Px` / `Py`, `0x80` marks "no contact
+point" (check `Px`).
 
 **Host decoding**:
 
 ```
-Px [mm] = byte × 32 / 255            Fz [N]     = byte × 70 / 255         # uint8
+Px [mm] = int8(byte) × 16 / 127      Fz [N]     = byte × 70 / 255         # uint8
 Py [mm] = int8(byte) × 12.5 / 127    Fx, Fy [N] = int8(byte) × 35 / 127   # int8: byte ≥ 128 → byte − 256
+Px byte = 0x80 → no contact point (ignore Px and Py)
 ```
 
 **Conversion examples**
 
 | Field | Source register | Physical | × qmax / fs, rounded | After clamp | Byte | Decoded |
 |---|---|---|---|---|---|---|
-| `Px` | 1523 | 15.23 mm | 121.36 → 121 | 121 | `0x79` | 15.18 mm |
-| `Px` | 270 | 2.70 mm (smallest real contact point) | 21.52 → 22 | 22 | `0x16` | 2.76 mm |
-| `Px` | 0 | no contact point | 0 | 0 | `0x00` | 0 = no contact point |
-| `Px` | 3200 | 32.00 mm (full scale) | 255 | 255 | `0xFF` | 32.00 mm |
+| `Px` | 523 | 5.23 mm (toward the wrist) | 41.51 → 42 | 42 | `0x2A` | 5.29 mm |
+| `Px` | −1333 | −13.33 mm (fingertip-side cell row) | −105.81 → −106 | −106 | `0x96` | −13.35 mm |
+| `Px` | −32768 | no contact point | — | — | `0x80` | no contact point |
+| `Px` | 1600 | 16.00 mm (full scale) | 127 | 127 | `0x7F` | 16.00 mm |
 | `Py` | −412 | −4.12 mm | −41.86 → −42 | −42 | `0xD6` | −4.13 mm |
 | `Py` | −1250 | −12.50 mm (full scale) | −127 | −127 | `0x81` | −12.50 mm |
 | `Fx` | −87 | −0.87 N | −3.16 → −3 | −3 | `0xFD` | −0.83 N |
@@ -792,7 +818,7 @@ Py [mm] = int8(byte) × 12.5 / 127    Fx, Fy [N] = int8(byte) × 35 / 127   # in
   (`Fz`). Smaller forces read 0. Position resolution is finer than the
   old 0.2 mm step; force resolution is coarser (0.27 N instead of 0.2 N)
   because the force range grew from 51 N to 70 N.
-- **Range**: the position full scales are the cell area itself (X 0..32 mm,
+- **Range**: the position full scales are the cell area itself (X ±16 mm,
   Y ±12.5 mm), so positions always fit. Forces beyond 70 N (Fz) or ±35 N
   (Fx, Fy) clamp, stay at the end value and set `saturated` in `status8`.
 - Fz is floored at 0, so a slightly negative reading after tare shows 0.
@@ -824,7 +850,7 @@ Slave 1, read 10 registers from `0x02C0`:
 
 ```
 Request : 01 03 02 C0 00 0A C4 49
-Response: 01 03 14 00 FB 00 C8 00 25 79 D6 FD 08 2D 69 00 00 00 00 00 48 00 00 5C 3A
+Response: 01 03 14 00 FB 00 C8 00 25 2A D6 FD 08 2D 69 80 80 00 00 00 48 00 00 86 C1
 ```
 
 | Register | Word | Decoded |
@@ -832,15 +858,15 @@ Response: 01 03 14 00 FB 00 C8 00 25 79 D6 FD 08 2D 69 00 00 00 00 00 48 00 00 5
 | `0x02C0` | `00 FB` | STATUS: gACT 1, gHOM 1, gGTO 1, gSTA 3 (Active), gOBJ 3 (move finished — with gPO 200 below a close target of 255, the fingers stopped on an object) |
 | `0x02C1` | `00 C8` | gPO = 200 |
 | `0x02C2` | `00 25` | gCU = 37 |
-| `0x02C3` | `79 D6` | right Px = 121 × 32/255 = **15.18 mm** · Py = int8(0xD6) = −42 → × 12.5/127 = **−4.13 mm** |
+| `0x02C3` | `2A D6` | right Px = int8(0x2A) = 42 → × 16/127 = **5.29 mm** (toward the wrist) · Py = int8(0xD6) = −42 → × 12.5/127 = **−4.13 mm** (right of centre) |
 | `0x02C4` | `FD 08` | right Fx = int8(0xFD) = −3 → × 35/127 = **−0.83 N** · Fy = 8 → **2.20 N** |
 | `0x02C5` | `2D 69` | right Fz = 45 × 70/255 = **12.35 N** · status8 `0x69` = valid, connected, contact, seen → `LIVE` with contact |
-| `0x02C6`–`0x02C7` | `00 00 00 00` | left values 0 (no valid reading) |
+| `0x02C6`–`0x02C7` | `80 80 00 00` | left Px = Py = `0x80` (no contact point), Fx = Fy = 0 — no valid reading |
 | `0x02C8` | `00 48` | left Fz = 0 · status8 `0x48` = connected, seen (valid 0, timeout 0) → `WAITING` |
 | `0x02C9` | `00 00` | gFLT = 0 |
 
 At full resolution (`0x0221~0x0225`) the right tip of this example reads
-POSX 1523, POSY −412, FX −87, FY 230, FZ 1234 (15.23 mm, −4.12 mm,
+POSX 523, POSY −412, FX −87, FY 230, FZ 1234 (5.23 mm, −4.12 mm,
 −0.87 N, 2.30 N, 12.34 N).
 
 #### Polling rate and bus timing / 폴링 주기
@@ -1005,7 +1031,8 @@ PID 저장/복원 등)과 절차는 매뉴얼 참고.
   When you also need tactile data at a high rate, one read of the
   fast-poll block (`0x02C0`, 10 registers) replaces both reads.
 - Tactile tip 1 is the **right** finger, tip 2 the **left**. A tactile
-  `POSX` of 0 means "no contact point", not "at the edge". Only zero the
+  `POSX` of −32768 (`0x8000`, fast block `Px` = `0x80`) means "no contact
+  point"; 0 is the centre of the cell area (firmware ≥ v1.27.0). Only zero the
   sensor (`TACTILE_CMD` ZERO) with nothing touching the pads, and expect
   ~1.25 s of `WAITING` (valid = 0) afterwards.
 - AFT_XXX-C values are signed int16 (`0x8000` and up are negative). Zero
@@ -1094,6 +1121,7 @@ if blocking:
 # device info: read(0x01C4, 8) -> version/hash/flags/build time (fw >= v1.25, else all 0)
 #              read(0x01C0, 4) product code + read(0x0188, 2) -> NNNN, YYMM (fw >= v1.24)
 # tactile (CFG_SENSOR_TYPE=2): read(0x0220, 16) -> per tip [status][posX][posY][fx][fy][fz][rate][rxcnt]
+#              int16, mm*100 / N*100; posX = posY = -32768 = no contact point (fw >= v1.27; +X wrist, +Y left)
 # AFT F/T (CFG_SENSOR_TYPE=1): read(0x0210, 16) -> [status][Fx Fy Fz: N*100][Tx Ty Tz: Nm*1000] (tip 1),
 #              same 7 for tip 2, [AFT_LINK][AFT_ERRWORD] (fw >= v1.26 for AFT_XXX-C); int16, valid = status & 0x0100
 # fast poll (fw >= v1.15): read(0x02C0, 10) -> status, gPO, gCU, both tips' tactile (8-bit), gFLT
@@ -1130,9 +1158,12 @@ you need to write a client in a fourth language:
 
 ## Known limitations / 알려진 제한
 
-- **Tactile shear-force sign**: the Fx/Fy direction assumes that the
-  sensor's force and position share one frame. This is not yet confirmed
-  on hardware.
+- **Tactile shear force**: the Fx/Fy directions were confirmed on
+  hardware with firmware v1.27.0 (same axes as the position). The
+  absolute shear values are not yet reliable: the sensor shows crosstalk
+  from Fz and from the contact position into Fx/Fy, and its zero can
+  drift by 1–3 N after a saturating load. This is being addressed in the
+  sensor firmware.
 - **Tactile zero, right tip**: the zero CAN ID of the right-hand sensor
   is not confirmed, so `tactile_zero()` / `tactileZero()` falls back to
   the firmware software tare for that tip. The left tip gets a real sensor

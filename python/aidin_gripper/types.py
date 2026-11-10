@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import IntEnum
+from typing import Optional
 
 
 class GripperStage(IntEnum):
@@ -52,12 +53,18 @@ class TactileLink(IntEnum):
 
 @dataclass
 class TactileTip:
-    """Contact resultant of one fingertip, in the gripper frame (firmware >= v1.18.0).
+    """Contact resultant of one fingertip, in the gripper frame (firmware >= v1.27.0).
 
-    pos_x: 0..32 mm from the wrist-side edge of the cell area toward the
-    fingertip; 0 = no contact point (also when Fz is too small to locate one).
-    pos_y: +-12.5 mm across the pad width. Forces are after tare, fz > 0 = pressing.
-    Values are 0 while ``valid`` is False.
+    Pad contact face seen head-on, fingertip end up: origin = centre of the
+    32 mm cell area, +X = toward the wrist, +Y = left.
+    pos_x: +-16 mm (fingertip end = -16), pos_y: +-12.5 mm. Both are ``None``
+    when there is no contact point (``valid`` False, or Fz too small to locate
+    one) - check ``has_contact_point``. 0 is the centre, not "none".
+    fx/fy: shear along the same axes (+ = toward the wrist / left), fz > 0 =
+    pressing; all after tare. Forces are 0 while ``valid`` is False.
+    Firmware <= v1.26.0 used another frame (X 0..32 mm from the wrist-side
+    edge toward the fingertip, +Y right, 0 = none, forces opposite to X/Y) -
+    the SDK decodes its "none" (0) as a contact point at the centre.
     """
     valid:       bool  = False
     saturated:   bool  = False
@@ -67,8 +74,8 @@ class TactileTip:
     contact:     bool  = False   # valid and Fz >= 0.5 N
     seen:        bool  = False
     raw_fresh:   bool  = False
-    pos_x:       float = 0.0     # mm
-    pos_y:       float = 0.0     # mm
+    pos_x:       Optional[float] = None   # mm, None = no contact point
+    pos_y:       Optional[float] = None   # mm, None = no contact point
     fx:          float = 0.0     # N
     fy:          float = 0.0     # N
     fz:          float = 0.0     # N
@@ -86,11 +93,13 @@ class TactileTip:
 
     @property
     def has_contact_point(self) -> bool:
-        return self.valid and self.pos_x > 0.0
+        return self.valid and self.pos_x is not None and self.pos_y is not None
 
     def __str__(self) -> str:
+        pos = (f"pos=({self.pos_x:.2f},{self.pos_y:.2f})mm" if self.has_contact_point
+               else "pos=none")
         return (
-            f"{{{self.link.name} pos=({self.pos_x:.2f},{self.pos_y:.2f})mm "
+            f"{{{self.link.name} {pos} "
             f"F=({self.fx:.2f},{self.fy:.2f},{self.fz:.2f})N"
             f"{' contact' if self.contact else ''}{' SAT' if self.saturated else ''}}}"
         )
@@ -110,8 +119,8 @@ class FastState:
     """One snapshot of the fast-poll block 0x02C0..0x02C9 (single FC03 read).
 
     Gripper fields are copies of 0x0200/0x0201/0x0203/0x0204. Tactile values
-    are 8-bit compressed over each field's full scale (Px 32 mm, Py +-12.5 mm,
-    Fx/Fy +-35 N, Fz 70 N; protocol >= v1.19.0) - use read_tactile() when
+    are 8-bit compressed over each field's full scale (Px +-16 mm, Py +-12.5 mm,
+    Fx/Fy +-35 N, Fz 70 N; protocol >= v1.27.0) - use read_tactile() when
     you need 0.01 resolution, rate_hz or rx_count.
     """
     activated:    bool         = False

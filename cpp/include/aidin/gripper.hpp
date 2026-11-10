@@ -106,8 +106,9 @@ public:
     // Fast-poll block (0x02C0..0x02C9) in ONE transaction: status, position,
     // current, fault + both fingertips' tactile resultant, refreshed atomically
     // by the firmware (~4 ms at 115200 bps). Tactile values are 8-bit compressed
-    // over each field's full scale (Px 32 mm, Py +-12.5 mm, Fx/Fy +-35 N, Fz 70 N).
-    // Firmware protocol >= v1.15.0; the scales decode correctly only with >= v1.19.0.
+    // over each field's full scale (Px +-16 mm, Py +-12.5 mm, Fx/Fy +-35 N, Fz 70 N).
+    // Firmware protocol >= v1.15.0; the tactile values decode correctly only with
+    // >= v1.27.0 (signed Px, 0x80 = no contact point).
     FastState    readFastState();
 
     // ---------- Device information ----------
@@ -124,8 +125,9 @@ public:
     // Needs CFG_SENSOR_TYPE = reg::SENSOR_TACTILE (write it, then SAVE_CONFIG —
     // applies immediately, no reboot).
     // Both fingertips' contact resultant (0x0220..0x022F, one transaction):
-    // {right (tip 1), left (tip 2)} — contact point [mm], Fx/Fy/Fz [N], 0.01
-    // resolution, link state. With another sensor type both read NotDetected.
+    // {right (tip 1), left (tip 2)} — contact point [mm] (NaN = none, see
+    // TactileTip), Fx/Fy/Fz [N], 0.01 resolution, link state. Gripper frame of
+    // firmware >= v1.27.0. With another sensor type both read NotDetected.
     TactilePair  readTactile();
     // Raw 69-channel diagnostic stream of one tip (bring-up only).
     // tip = reg::TACT_TIP_RIGHT or reg::TACT_TIP_LEFT. The block keeps its last

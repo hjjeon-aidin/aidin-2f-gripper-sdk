@@ -2,7 +2,7 @@
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
   <name>aidin_gripper_driver</name>
-  <version>1.2.0</version>
+  <version>1.3.0</version>
   <description>ROS2 driver node for the AIDIN BLDC gripper. Bridges the C++ SDK (DH-Robotics Modbus RTU) onto ROS2 topics and services.</description>
   <maintainer email="hj.jeon@aidinrobotics.co.kr">AIDIN Robotics Firmware Team</maintainer>
   <license>MIT</license>

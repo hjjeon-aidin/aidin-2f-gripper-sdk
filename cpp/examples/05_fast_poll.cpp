@@ -3,9 +3,9 @@
 // One FC03 read of 10 registers returns gripper status, position, current,
 // fault AND both fingertips' tactile resultant as one consistent snapshot
 // (~4 ms per read at 115200 bps). Tactile values are 8-bit compressed over
-// each field's full scale (Px 32 mm, Py +-12.5 mm, Fx/Fy +-35 N, Fz 70 N).
-// Needs firmware protocol >= v1.19.0 for the tactile scales; tactile fields
-// are 0 unless the sensor type is tactile.
+// each field's full scale (Px +-16 mm, Py +-12.5 mm, Fx/Fy +-35 N, Fz 70 N).
+// Needs firmware protocol >= v1.27.0 for the tactile scales and frame; tactile
+// fields are 0 / no contact point unless the sensor type is tactile.
 //
 // Usage:
 //   ./05_fast_poll /dev/ttyUSB0

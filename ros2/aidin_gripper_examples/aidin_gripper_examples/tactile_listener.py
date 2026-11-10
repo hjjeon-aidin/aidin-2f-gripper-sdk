@@ -2,6 +2,8 @@
 
 Run the driver with publish_tactile:=true.
 """
+import math
+
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
@@ -11,7 +13,10 @@ _LINK = {0: "NOT_DETECTED", 1: "DISCONNECTED", 2: "RAW_STREAM", 3: "WAITING", 4:
 
 
 def _fmt(t) -> str:
-    return (f"{_LINK.get(t.link, '?'):12s} pos=({t.pos_x:5.2f},{t.pos_y:6.2f})mm "
+    # +X = toward the wrist, +Y = left (pad face head-on, fingertip end up)
+    pos = (f"pos=({t.pos_x:6.2f},{t.pos_y:6.2f})mm" if not math.isnan(t.pos_x)
+           else "pos=(  none,  none)mm")   # NaN = no contact point
+    return (f"{_LINK.get(t.link, '?'):12s} {pos} "
             f"F=({t.fx:5.2f},{t.fy:5.2f},{t.fz:5.2f})N {t.rate_hz:3d}Hz"
             f"{' contact' if t.contact else ''}")
 

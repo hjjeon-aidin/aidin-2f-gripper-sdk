@@ -227,7 +227,7 @@ private:
         m.valid     = t.valid;
         m.contact   = t.contact;
         m.saturated = t.saturated;
-        m.pos_x     = t.posX;
+        m.pos_x     = t.posX;               // NaN = no contact point
         m.pos_y     = t.posY;
         m.fx        = t.fx;
         m.fy        = t.fy;

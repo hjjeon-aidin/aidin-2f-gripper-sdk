@@ -240,7 +240,7 @@ class GripperState:
 
 ## Tactile sensor
 
-Needs firmware protocol ≥ v1.18.0 and `CFG_SENSOR_TYPE = 2` (tactile).
+Needs firmware protocol ≥ v1.27.0 (coordinate frame below) and `CFG_SENSOR_TYPE = 2` (tactile).
 Set it once with `python examples/08_tactile_sensor.py PORT --enable`
 (writes `0x018A`, `SAVE_CONFIG` — applies immediately, no reboot). Tip 1 =
 **right** finger, tip 2 = **left** finger.
@@ -252,7 +252,8 @@ with Gripper() as g:
     g.connect("/dev/ttyUSB0")
     right, left = g.read_tactile()          # one 16-register read
     if right.link == TactileLink.LIVE:
-        print(right.pos_x, right.pos_y)      # contact point [mm]
+        if right.has_contact_point:          # else pos_x = pos_y = None
+            print(right.pos_x, right.pos_y)  # contact point [mm]
         print(right.fx, right.fy, right.fz)  # force [N], fz > 0 = pressing
     g.tactile_zero()                         # pads untouched!
 ```
@@ -261,16 +262,21 @@ with Gripper() as g:
 @dataclass
 class TactileTip:
     valid, saturated, timeout, connected, raw_stream, contact, seen, raw_fresh: bool
-    pos_x:    float  # mm, 0..32 from the wrist-side edge of the cell area toward the fingertip; 0 = no contact point
-    pos_y:    float  # mm, +-12.5 across the pad width
-    fx, fy:   float  # N, shear along +pos_x / +pos_y (after tare)
+    pos_x:    float | None  # mm, +-16 from the cell-area centre, + = toward the wrist; None = no contact point
+    pos_y:    float | None  # mm, +-12.5 across the pad width, + = left; None = no contact point
+    fx, fy:   float  # N, shear along +pos_x / +pos_y (toward the wrist / left, after tare)
     fz:       float  # N, normal force, > 0 = pressing (after tare)
     rate_hz:  int    # result frames in the last second (~100); read_tactile() only
     rx_count: int    # result frames since boot (wraps); read_tactile() only
     status:   int    # raw TACT_STATUS word
     link             # property -> TactileLink
-    has_contact_point  # property: valid and pos_x > 0
+    has_contact_point  # property: valid and pos_x is not None
 ```
+
+Frame (firmware ≥ v1.27.0): pad contact face seen head-on, fingertip end
+up — origin = centre of the 32 mm cell area, +X = toward the wrist, +Y =
+left; forces use the same axes. Firmware ≤ v1.26.0 used another frame
+(see the [root README](../README.md#tactile-sensor--촉각-센서-0x0220)).
 
 `TactileLink`: `NOT_DETECTED` (never seen — not fitted / wiring / sensor
 type ≠ 2) · `DISCONNECTED` (frames stopped) · `RAW_STREAM` (sensor sends

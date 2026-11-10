@@ -2,8 +2,11 @@
 //
 // Each fingertip reports one contact resultant at 100 Hz: contact point
 // (posX, posY) [mm] and force (fx, fy, fz) [N]. Tip 1 = right finger, tip 2 =
-// left finger. Needs firmware protocol >= v1.18.0 and CFG_SENSOR_TYPE = 2
-// (tactile) — see "Tactile sensor" in MANUAL.md for the one-time setup.
+// left finger. Origin = centre of the cell area, +X = toward the wrist,
+// +Y = left (pad face seen head-on, fingertip end up); forces use the same
+// axes; "pos=none" = no contact point. Needs firmware protocol >= v1.27.0 for
+// this frame and CFG_SENSOR_TYPE = 2 (tactile) — see "Tactile sensor" in
+// MANUAL.md for the one-time setup.
 //
 // Usage:
 //   ./04_tactile_monitor /dev/ttyUSB0          # stream both tips @ 20 Hz

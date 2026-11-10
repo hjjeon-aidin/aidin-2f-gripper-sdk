@@ -2,7 +2,9 @@
 #pragma once
 
 #include <array>
+#include <cmath>
 #include <cstdint>
+#include <limits>
 #include <ostream>
 #include <string>
 
@@ -45,11 +47,17 @@ enum class TactileLink : uint8_t {
     Live         = 4,  // valid values
 };
 
-// Contact resultant of one fingertip, in the gripper frame (firmware >= v1.18.0).
-//   posX: 0..32 mm from the wrist-side edge of the cell area toward the
-//         fingertip; 0 = no contact point (also when Fz is too small to locate one)
-//   posY: +-12.5 mm across the pad width. Forces after tare, fz > 0 = pressing.
-// Values are 0 while valid is false.
+// Contact resultant of one fingertip, in the gripper frame (firmware >= v1.27.0).
+// Pad contact face seen head-on, fingertip end up: origin = centre of the
+// 32 mm cell area, +X = toward the wrist, +Y = left.
+//   posX: +-16 mm (fingertip end = -16), posY: +-12.5 mm. Both are NaN when
+//         there is no contact point (valid false, or Fz too small to locate
+//         one) — check hasContactPoint(). 0 is the centre, not "none".
+//   fx/fy: shear along the same axes (+ = toward the wrist / left),
+//         fz > 0 = pressing; all after tare. Forces are 0 while valid is false.
+// Firmware <= v1.26.0 used another frame (X 0..32 mm from the wrist-side edge
+// toward the fingertip, +Y right, 0 = none, forces opposite to X/Y) — the SDK
+// decodes its "none" (0) as a contact point at the centre.
 struct TactileTip {
     bool     valid     = false;
     bool     saturated = false;
@@ -59,8 +67,8 @@ struct TactileTip {
     bool     contact   = false;  // valid and Fz >= 0.5 N
     bool     seen      = false;
     bool     rawFresh  = false;
-    float    posX = 0.0f;        // mm
-    float    posY = 0.0f;        // mm
+    float    posX = std::numeric_limits<float>::quiet_NaN();  // mm, NaN = no contact point
+    float    posY = std::numeric_limits<float>::quiet_NaN();  // mm, NaN = no contact point
     float    fx   = 0.0f;        // N
     float    fy   = 0.0f;        // N
     float    fz   = 0.0f;        // N
@@ -73,7 +81,7 @@ struct TactileTip {
         if (connected) return rawStream ? TactileLink::RawStream : TactileLink::Waiting;
         return seen ? TactileLink::Disconnected : TactileLink::NotDetected;
     }
-    bool hasContactPoint() const { return valid && posX > 0.0f; }
+    bool hasContactPoint() const { return valid && !std::isnan(posX) && !std::isnan(posY); }
 };
 
 // Both fingertips. Index 0 = right (tip 1), 1 = left (tip 2).
@@ -89,8 +97,8 @@ struct TactileRaw {
 
 // One snapshot of the fast-poll block 0x02C0..0x02C9 (single FC03 read).
 // Gripper fields are copies of 0x0200/0x0201/0x0203/0x0204. Tactile values
-// are 8-bit compressed over each field's full scale (Px 32 mm, Py ±12.5 mm,
-// Fx/Fy ±35 N, Fz 70 N; protocol >= v1.19.0) — use readTactile() when you
+// are 8-bit compressed over each field's full scale (Px ±16 mm, Py ±12.5 mm,
+// Fx/Fy ±35 N, Fz 70 N; protocol >= v1.27.0) — use readTactile() when you
 // need 0.01 resolution, rateHz or rxCount.
 struct FastState {
     bool         activated  = false;
@@ -192,9 +200,10 @@ inline const char* toString(TactileLink l) {
 }
 
 inline std::ostream& operator<<(std::ostream& os, const TactileTip& t) {
-    os << "{" << toString(t.link())
-       << " pos=(" << t.posX << "," << t.posY << ")mm"
-       << " F=("   << t.fx << "," << t.fy << "," << t.fz << ")N";
+    os << "{" << toString(t.link());
+    if (t.hasContactPoint()) os << " pos=(" << t.posX << "," << t.posY << ")mm";
+    else                     os << " pos=none";
+    os << " F=(" << t.fx << "," << t.fy << "," << t.fz << ")N";
     if (t.contact)   os << " contact";
     if (t.saturated) os << " SAT";
     os << "}";

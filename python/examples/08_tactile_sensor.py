@@ -2,8 +2,10 @@
 
 Each fingertip reports one contact resultant at 100 Hz: the contact point
 (pos_x, pos_y) [mm] and the force (fx, fy, fz) [N]. Tip 1 = right finger,
-tip 2 = left finger. Needs firmware protocol >= v1.18.0 and the sensor type
-set to tactile (one-time setup, --enable below).
+tip 2 = left finger. Origin = centre of the cell area, +X = toward the wrist,
++Y = left (pad face seen head-on, fingertip end up); forces use the same axes;
+"pos=none" = no contact point. Needs firmware protocol >= v1.27.0 for this
+frame and the sensor type set to tactile (one-time setup, --enable below).
 
 Usage:
     python 08_tactile_sensor.py /dev/ttyUSB0             # stream both tips @ 20 Hz
@@ -82,7 +84,7 @@ def main() -> int:
             print("Streaming (CTRL+C to quit). pos [mm], F [N]")
             while not _stop:
                 right, left = g.read_tactile()
-                print(f"R {right}  |  L {left}", end="\r", flush=True)
+                print(f"R {right}  |  L {left}        ", end="\r", flush=True)
                 time.sleep(0.05)
             print("\nStopped.")
     except Exception as e:

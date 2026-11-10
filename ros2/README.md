@@ -170,8 +170,9 @@ ros2 run aidin_gripper_examples tactile_listener
 
 ### `TactileState` fields (fingertip tactile sensors)
 
-Needs firmware protocol ≥ v1.18.0 and the gripper's sensor type set to
-tactile (`CFG_SENSOR_TYPE` `0x018A` = 2, then `SAVE_CONFIG` — applies
+Needs firmware protocol ≥ v1.27.0 for the coordinate frame below (older
+firmware used another frame — see the [root README](../README.md#tactile-sensor--촉각-센서-0x0220))
+and the gripper's sensor type set to tactile (`CFG_SENSOR_TYPE` `0x018A` = 2, then `SAVE_CONFIG` — applies
 immediately; e.g. with `python/examples/08_tactile_sensor.py PORT
 --enable` while the driver is not running). Launch with
 `publish_tactile:=true`; each cycle the driver then also reads
@@ -189,12 +190,12 @@ tactile the driver logs a warning and both tips report `LINK_NOT_DETECTED`.
 | Field       | Type    | Notes |
 |-------------|---------|-------|
 | `link`      | uint8   | `LINK_NOT_DETECTED=0` (never seen / sensor type ≠ 2), `LINK_DISCONNECTED=1`, `LINK_RAW_STREAM=2` (sensor sends raw channels), `LINK_WAITING=3` (zeroing: ~4.5 s after power-up, ~1.25 s after `tactile_zero`), `LINK_LIVE=4` |
-| `valid`     | bool    | values are valid (all values are 0 otherwise) |
+| `valid`     | bool    | values are valid (forces are 0 and positions NaN otherwise) |
 | `contact`   | bool    | valid and `fz` ≥ 0.5 N |
 | `saturated` | bool    | a value hit its limit / sensor over-range |
-| `pos_x`     | float32 | contact point [mm], 0..32 from the wrist-side edge of the cell area toward the fingertip — **0 = no contact point** |
-| `pos_y`     | float32 | contact point [mm], ±12.5 across the pad width |
-| `fx` / `fy` | float32 | shear force [N] along +`pos_x` / +`pos_y`, after tare |
+| `pos_x`     | float32 | contact point [mm], ±16 from the centre of the cell area, **+ = toward the wrist** (fingertip end = −16) — **NaN = no contact point** (0 = centre) |
+| `pos_y`     | float32 | contact point [mm], ±12.5 across the pad width, **+ = left** (pad face seen head-on, fingertip end up) — NaN = no contact point |
+| `fx` / `fy` | float32 | shear force [N] along +`pos_x` / +`pos_y` (toward the wrist / left), after tare |
 | `fz`        | float32 | normal force [N], positive = pressing, after tare |
 | `rate_hz`   | uint16  | result frames received in the last second (≈ 100) |
 | `status`    | uint16  | raw `TACT_STATUS` register (bits in the [root README](../README.md#tactile-sensor--촉각-센서-0x0220)) |
