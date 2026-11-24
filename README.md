@@ -454,8 +454,7 @@ register calls — step by step in [AFT F/T sensor](#aft-ft-sensor--aft-ft-센�
 Firmware ≥ v1.26.0 for the AFT_XXX-C series (e.g. **AFT_RBY2-C**,
 400 N / 20 Nm). One six-axis force/torque sensor is mounted on the
 gripper's CAN bus; the firmware decodes its frames and puts the six
-values in the **tip 1** block. This section is newer than Protocol
-Manual Rev 2.7 (Spec v1.27.0).
+values in the **tip 1** block.
 
 AFT_XXX-C 6축 힘/토크 센서(예: AFT_RBY2-C)를 그리퍼 CAN 버스에 연결하면
 펌웨어가 프레임을 디코드해 **팁 1 블록(`0x0210~0x0216`)** 에 넣습니다

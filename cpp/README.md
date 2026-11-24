@@ -6,7 +6,7 @@ implemented in-tree (`src/modbus_rtu.cpp`, termios/Win32 direct serial I/O), so
 there are **no external dependencies** beyond a compiler and CMake.
 
 > **Full developer manual:** [MANUAL.md](MANUAL.md) — protocol reference, API details, troubleshooting, FAQ.
-> Firmware compatibility: [../README.md](../README.md#compatibility--호환성) (works with any firmware; recommended 1.25.1).
+> Firmware compatibility: [../README.md](../README.md#compatibility--호환성) (works with any firmware; recommended 1.27.0).
 
 ```cpp
 #include "aidin/gripper.hpp"

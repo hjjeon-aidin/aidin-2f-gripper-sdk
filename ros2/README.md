@@ -29,7 +29,7 @@ in-tree (**no external Modbus library**) — and publishes live state at
 Modbus RTU 프레이밍을 자체 구현해 **외부 Modbus 라이브러리 의존성이 없습니다**.
 레지스터 계약은 제품과 함께 제공되는 **Aidin Gripper Modbus RTU Protocol
 Manual Rev 2.7 (Spec v1.27.0)** 을 따릅니다. 펌웨어 호환성:
-[../README.md](../README.md#compatibility--호환성) (모든 펌웨어에서 동작, 권장 1.25.1).
+[../README.md](../README.md#compatibility--호환성) (모든 펌웨어에서 동작, 권장 1.27.0).
 
 ---
 
