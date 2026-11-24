@@ -149,8 +149,8 @@ internal mutex, so driving both grippers from separate threads is safe too
 
 The Modbus register layout used here (DH-Robotics compatible) lives in
 [`include/aidin/registers.hpp`](include/aidin/registers.hpp) and mirrors the
-register map of the Aidin Gripper Modbus RTU Protocol Manual Rev 2.6 (Spec
-v1.25.1), provided with the product. Key registers:
+register map of the Aidin Gripper Modbus RTU Protocol Manual Rev 2.7 (Spec
+v1.27.0), provided with the product. Key registers:
 
 | Addr | Direction | Field |
 |---|---|---|

@@ -566,8 +566,8 @@ arrive but are invalid — sensor zeroing, ≈ 4.5 s after power-up or
 
 The firmware exposes a **DH-Robotics RTU compatible** holding-register
 map. The constants in `aidin::reg::*` mirror these addresses 1:1. The full
-reference is the Aidin Gripper Modbus RTU Protocol Manual Rev 2.6 (Spec
-v1.25.1), provided with the product.
+reference is the Aidin Gripper Modbus RTU Protocol Manual Rev 2.7 (Spec
+v1.27.0), provided with the product.
 
 Transport (firmware ≥ v1.21): FC03 / FC06 / FC16 / FC23, anything else
 gets exception 01. A request ends after max(3.5 characters, 750 µs) of

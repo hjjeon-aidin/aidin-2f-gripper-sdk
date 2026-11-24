@@ -1,7 +1,7 @@
 """Modbus register map for the AIDIN BLDC gripper (DH-Robotics RTU compatible).
 
 Mirrors the register map of the Aidin Gripper Modbus RTU Protocol Manual
-Rev 2.6 (Spec v1.25.1), provided with the product. Addresses are Modbus wire
+Rev 2.7 (Spec v1.27.0), provided with the product. Addresses are Modbus wire
 (PDU) addresses. Keep cpp/include/aidin/registers.hpp in sync.
 """
 from typing import Final

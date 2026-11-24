@@ -26,8 +26,8 @@ SDK **1.3.0** (C++, Python and ROS2 alike) works with **any firmware**.
 Features newer than the firmware are simply unavailable — they read 0,
 return the Modbus exception "illegal address", or answer `DEV_STATUS` =
 ERROR. **Recommended firmware: 1.27.0** (tactile coordinate frame of SDK 1.3.0). Firmware versions are the protocol
-Spec versions of the *Aidin Gripper Modbus RTU Protocol Manual* (Rev 2.6
-covers Spec v1.25.1). Read the running version with
+Spec versions of the *Aidin Gripper Modbus RTU Protocol Manual* (Rev 2.7
+covers Spec v1.27.0). Read the running version with
 `read_firmware_info()` / `readFirmwareInfo()` / `~/get_device_info` —
 firmware ≤ v1.24 reports 0.0.0.
 
@@ -165,7 +165,7 @@ already exist here.
   register at its protocol-level (PDU) address.
 - Detailed per-register documentation — bit maps, value scaling, usage
   sequences, Modbus frame examples — is in the **Aidin Gripper Modbus RTU
-  Protocol Manual Rev 2.6 (Spec v1.25.1)**, provided with the product. It
+  Protocol Manual Rev 2.7 (Spec v1.27.0)**, provided with the product. It
   is not part of this repo: the registers mirrored in
   [`cpp/include/aidin/registers.hpp`](cpp/include/aidin/registers.hpp) /
   [`python/aidin_gripper/registers.py`](python/aidin_gripper/registers.py)
@@ -177,8 +177,8 @@ already exist here.
 
 > **📖 상세 설명은 매뉴얼을 참고하세요.** 아래 모든 레지스터의 비트맵, 값
 > 스케일링(정규화 공식), 사용 시퀀스, Modbus 프레임 예제는 제품과 함께
-> 제공되는 **Aidin Gripper Modbus RTU Protocol Manual Rev 2.6 (Spec
-> v1.25.1)** 에 있습니다. 이 README는 요약본입니다.
+> 제공되는 **Aidin Gripper Modbus RTU Protocol Manual Rev 2.7 (Spec
+> v1.27.0)** 에 있습니다. 이 README는 요약본입니다.
 > **For full details see the manual** — this README only summarizes each
 > register in one line.
 
@@ -455,7 +455,7 @@ Firmware ≥ v1.26.0 for the AFT_XXX-C series (e.g. **AFT_RBY2-C**,
 400 N / 20 Nm). One six-axis force/torque sensor is mounted on the
 gripper's CAN bus; the firmware decodes its frames and puts the six
 values in the **tip 1** block. This section is newer than Protocol
-Manual Rev 2.6 (Spec v1.25.1).
+Manual Rev 2.7 (Spec v1.27.0).
 
 AFT_XXX-C 6축 힘/토크 센서(예: AFT_RBY2-C)를 그리퍼 CAN 버스에 연결하면
 펌웨어가 프레임을 디코드해 **팁 1 블록(`0x0210~0x0216`)** 에 넣습니다

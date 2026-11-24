@@ -330,8 +330,8 @@ The same register map, same default arguments, same blocking semantics.
 ## Register map
 
 See [`aidin_gripper/registers.py`](aidin_gripper/registers.py). Mirrors the
-register map of the Aidin Gripper Modbus RTU Protocol Manual Rev 2.6 (Spec
-v1.25.1), provided with the product. Summary:
+register map of the Aidin Gripper Modbus RTU Protocol Manual Rev 2.7 (Spec
+v1.27.0), provided with the product. Summary:
 [`../README.md`](../README.md#register-map--레지스터-맵) and
 [`../cpp/MANUAL.md`](../cpp/MANUAL.md#7-protocol-reference-modbus-registers).
 

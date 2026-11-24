@@ -28,7 +28,7 @@ in-tree (**no external Modbus library**) — and publishes live state at
 [`aidin::Gripper`](../cpp/) 위에 토픽·서비스 인터페이스를 입혔으며, C++ SDK 는
 Modbus RTU 프레이밍을 자체 구현해 **외부 Modbus 라이브러리 의존성이 없습니다**.
 레지스터 계약은 제품과 함께 제공되는 **Aidin Gripper Modbus RTU Protocol
-Manual Rev 2.6 (Spec v1.25.1)** 을 따릅니다. 펌웨어 호환성:
+Manual Rev 2.7 (Spec v1.27.0)** 을 따릅니다. 펌웨어 호환성:
 [../README.md](../README.md#compatibility--호환성) (모든 펌웨어에서 동작, 권장 1.25.1).
 
 ---
@@ -96,7 +96,7 @@ separate Python SDK in [`python/`](../python/) uses `pymodbus` +
 - Homing pushes the fingers against a hard stop — make sure nothing is
   in the workspace before launching with `auto_home:=true`.
 - The register reference is the Aidin Gripper Modbus RTU Protocol Manual
-  Rev 2.6 (Spec v1.25.1), provided with the product. Questions and bug
+  Rev 2.7 (Spec v1.27.0), provided with the product. Questions and bug
   reports: <https://github.com/hjjeon-aidin/aidin-2f-gripper-sdk/issues>.
 
 ---
@@ -335,8 +335,8 @@ SUBSYSTEM=="tty", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6001", \
 - [SDK quick-start (`cpp/README.md`)](../cpp/README.md)
 - [SDK developer manual (`cpp/MANUAL.md`)](../cpp/MANUAL.md)
 - Register map mirror: [`cpp/include/aidin/registers.hpp`](../cpp/include/aidin/registers.hpp)
-  (full reference: Aidin Gripper Modbus RTU Protocol Manual Rev 2.6, Spec
-  v1.25.1, provided with the product)
+  (full reference: Aidin Gripper Modbus RTU Protocol Manual Rev 2.7, Spec
+  v1.27.0, provided with the product)
 - Firmware compatibility and protocol summary: [root README](../README.md#compatibility--호환성)
 
 ---
